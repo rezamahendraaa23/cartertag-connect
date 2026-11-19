@@ -36,7 +36,9 @@ class MainActivity : FlutterActivity() {
         val data = intent.data ?: return null
         if (data.host == "cartertag-connect.web.app" && (data.path ?: "").startsWith("/join")) {
             val kode = data.getQueryParameter("kode") ?: data.getQueryParameter("k") ?: return "join:"
-            return "join:" + kode
+            // r = d (driver) / k (koordinator): app langsung tahu perlu tanya nomor mobil atau tidak
+            val r = data.getQueryParameter("r") ?: ""
+            return "join:" + kode + (if (r.isNotEmpty()) "|$r" else "")
         }
         return null
     }

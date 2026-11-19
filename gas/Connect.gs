@@ -240,7 +240,24 @@ function connectTeamRead_() {
 
 function connectRosterEntry_(m) {
   return { mid: m.member_id, n: m.nama, r: m.role, car: m.nomor_mobil || '', cars: m.cars || [], area: m.area || '', plat: m.plat || '',
-    hp: m.hp || '', px: m.pub_x || '', pe: m.pub_ed || '', st: m.status, pf: m.platform || '', ls: m.last_seen || '' };
+    hp: m.hp || '', px: m.pub_x || '', pe: m.pub_ed || '', st: m.status, pf: m.platform || '', ls: m.last_seen || '', ja: connectMs_(m.joined_at) };
+}
+
+/** Anggota keluar / dikeluarkan + waktu keluarnya (ms presisi dari cache kalau ada, selain itu last_seen per menit). */
+function connectGone_(slug, team) {
+  var gone = team.list.filter(function (m) { return m.status === 'dikeluarkan' || m.status === 'keluar'; });
+  if (!gone.length) return [];
+  var cached = CacheService.getScriptCache().getAll(gone.map(function (m) { return 'CLMS_' + slug + '_' + m.member_id; }));
+  return gone.map(function (m) {
+    var ms = Number(cached['CLMS_' + slug + '_' + m.member_id]) || 0;
+    return { mid: m.member_id, at: ms || connectMs_(m.last_seen), p: !!ms };   // p = presisi ms (tidak perlu toleransi menit)
+  });
+}
+
+/** "yyyy-MM-dd'T'HH:mm" (nowLocal_) -> epoch ms; 0 kalau kosong / tidak terbaca. */
+function connectMs_(s) {
+  if (!s) return 0;
+  try { return Utilities.parseDate(String(s), Session.getScriptTimeZone(), "yyyy-MM-dd'T'HH:mm").getTime(); } catch (e) { return 0; }
 }
 
 function connectUpsertMember_(m) {
@@ -307,6 +324,8 @@ function connectBundle_(k, cfg, team, me) {
     epoch: cfg.epoch,
     group_key: connectGroupKey_(k.slug, cfg.epoch),
     roster: team.list.filter(function (m) { return m.status !== 'dikeluarkan' && m.status !== 'keluar'; }).map(connectRosterEntry_),
+    // yang keluar / dikeluarkan: app menyembunyikannya juga dari daftar yang dikenal lewat Bluetooth (at = waktu keluar)
+    gone: connectGone_(k.slug, team),
     manifest: connectManifestFor_(connectManifest_(cfg), me),
     firebase: fb,
     app: { version: setting_('CONNECT_APP_VERSION'), apk_url: setting_('CONNECT_APK_URL'), pwa_url: setting_('CONNECT_PWA_URL') },
@@ -371,7 +390,10 @@ function connectJoin_(b) {
     me.platform = b.platform === 'web' ? 'web' : 'android';
     me.fcm_token = cap_(b.fcm_token, 400);
     me.app_version = cap_(b.app_version, 20);
-    if (me.status !== 'aktif') { me.status = 'aktif'; me.joined_at = nowLocal_(); }
+    // join hanya dipanggil saat benar-benar gabung: selalu catat waktunya (dipakai menolak pemberitahuan keluar yang basi)
+    me.status = 'aktif'; me.joined_at = nowLocal_();
+    // waktu gabung presisi ms (joined_at di sheet cuma sampai menit): pembanding token di connectLeave_
+    CacheService.getScriptCache().put('CJMS_' + k.slug + '_' + mid, String(Date.now()), 21600);
     connectUpsertMember_(me);
     return connectBundle_(k, cfg, team, me);
   });
@@ -401,7 +423,16 @@ function connectLeave_(b) {
   return withLock_(function () {
     var me = connectTeam_(true).byId[p.m];
     if (!me) return { left: false };
-    if (me.status !== 'dikeluarkan') { me.status = 'keluar'; me.fcm_token = ''; connectUpsertMember_(me); }
+    // token diterbitkan (jam server) sebelum gabung terakhir = pemberitahuan dari sesi lama (tertunda / telat diproses): abaikan.
+    // Setiap join menerbitkan token baru, jadi keluar dari sesi sekarang selalu dicatat.
+    var iat = (Number(p.x) || 0) - CONNECT_TOKEN_DAYS * 86400000;
+    var jm = Number(CacheService.getScriptCache().get('CJMS_' + p.s + '_' + p.m)) || connectMs_(me.joined_at);
+    if (me.status === 'aktif' && jm && iat < jm) return { left: false, stale: true };
+    if (me.status !== 'dikeluarkan') {
+      me.status = 'keluar'; me.fcm_token = ''; connectUpsertMember_(me);
+      // waktu keluar presisi ms untuk daftar 'gone' (last_seen di sheet cuma sampai menit)
+      CacheService.getScriptCache().put('CLMS_' + p.s + '_' + p.m, String(Date.now()), 21600);
+    }
     return { left: true };
   });
 }

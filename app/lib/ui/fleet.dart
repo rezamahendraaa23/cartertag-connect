@@ -107,7 +107,6 @@ class _FleetScreenState extends State<FleetScreen> {
   Widget build(BuildContext context) {
     final h = Hub.i;
     final c = CT.of(context);
-    final cars = h.concert!.carsMap;
     final me = h.me;
     if (me.isDriver && me.car.isNotEmpty) return MyCarScreen(car: me.car, embedded: true);
     return StreamBuilder<FleetData>(
@@ -116,14 +115,22 @@ class _FleetScreenState extends State<FleetScreen> {
         final d = snap.data ?? FleetData(const {}, const {});
         final manifestOn = h.concert!.manifestEnabled;
         final day = manifestDay(h.concert!.manifest);
+        // mobil dari manifest hari ini tetap tampil walau drivernya keluar; driver aktif melengkapi
+        final cars = <String, Member?>{
+          for (final r in h.concert!.manifest)
+            if (r.car.isNotEmpty && (day.isEmpty || r.hari.isEmpty || r.hari == day)) r.car: null,
+          ...h.carsMap,
+        };
+        String areaOf(MapEntry<String, Member?> e) =>
+            e.value?.area ?? h.concert!.manifest.where((r) => r.car == e.key && r.area.isNotEmpty).map((r) => r.area).firstOrNull ?? '';
         final allPergiDone = forcePulang || !manifestOn || (cars.isNotEmpty && cars.keys.every((k) => d.pergiChecked(k, day)));
         final leg = allPergiDone ? (this.leg ?? (manifestOn ? 'pulang' : 'pergi')) : 'pergi';
         List<ManifestRow> rowsOf(String car) =>
             h.concert!.manifest.where((r) => r.car == car && r.hasLeg(leg) && (day.isEmpty || r.hari.isEmpty || r.hari == day)).toList();
         int belumOf(String car) => rowsOf(car).where((r) => d.checkin(r, leg) == null).length;
         var list = cars.entries.toList()..sort((a, b) => (int.tryParse(a.key) ?? 999).compareTo(int.tryParse(b.key) ?? 999));
-        if (me.isDriver && me.area.isNotEmpty) list = list.where((e) => e.value.area == me.area).toList();
-        if (area.isNotEmpty) list = list.where((e) => e.value.area == area).toList();
+        if (me.isDriver && me.area.isNotEmpty) list = list.where((e) => areaOf(e) == me.area).toList();
+        if (area.isNotEmpty) list = list.where((e) => areaOf(e) == area).toList();
         // yang masih ada penumpang belum dicentang di atas
         list.sort((a, b) => (belumOf(a.key) == 0 ? 1 : 0).compareTo(belumOf(b.key) == 0 ? 1 : 0));
         final total = list.length;
@@ -208,7 +215,7 @@ class _FleetScreenState extends State<FleetScreen> {
 class _CarCard extends StatelessWidget {
   const _CarCard({required this.car, required this.driver, required this.leg, required this.d, required this.rows});
   final String car;
-  final Member driver;
+  final Member? driver;
   final String leg;
   final FleetData d;
   final List<ManifestRow> rows;
@@ -219,11 +226,13 @@ class _CarCard extends StatelessWidget {
     final pax = rows.fold<int>(0, (a, r) => a + r.pax);
     final naik = rows.where((r) => d.checkin(r, leg) == 'naik').fold<int>(0, (a, r) => a + r.pax);
     final belum = rows.where((r) => d.checkin(r, leg) == null).length;
-    final peer = Hub.i.meshPeersList.where((p) => p.memberId == driver.id).firstOrNull;
+    final dr = driver;
+    final peer = dr == null ? null : Hub.i.meshPeersList.where((p) => p.memberId == dr.id).firstOrNull;
+    final area = dr?.area ?? rows.where((r) => r.area.isNotEmpty).map((r) => r.area).firstOrNull ?? '';
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
       child: PressBox(
-        semantics: '${carName(car)}, ${driver.name}',
+        semantics: '${carName(car)}, ${dr?.name ?? 'belum ada driver di app'}',
         onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => MyCarScreen(car: car))),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
@@ -231,8 +240,9 @@ class _CarCard extends StatelessWidget {
             const SizedBox(width: 10),
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(driver.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.titleMedium),
-                Text([if (driver.plat.isNotEmpty) driver.plat, if (driver.area.isNotEmpty) driver.area].join(' · '), style: mono(12, color: c.muted)),
+                Text(dr?.name ?? 'Driver belum di app', maxLines: 1, overflow: TextOverflow.ellipsis,
+                    style: dr == null ? TextStyle(color: c.muted, fontWeight: FontWeight.w600) : Theme.of(context).textTheme.titleMedium),
+                Text([if ((dr?.plat ?? '').isNotEmpty) dr!.plat, if (area.isNotEmpty) area].join(' · '), style: mono(12, color: c.muted)),
               ]),
             ),
             if (rows.isNotEmpty)
@@ -281,7 +291,7 @@ class _MyCarScreenState extends State<MyCarScreen> {
   Widget build(BuildContext context) {
     final h = Hub.i;
     final c = CT.of(context);
-    final driver = h.concert!.carsMap[widget.car];
+    final driver = h.carsMap[widget.car];
     final manifestOn = h.concert!.manifestEnabled;
     final body = StreamBuilder<FleetData>(
         stream: _fleet,

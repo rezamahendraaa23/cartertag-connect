@@ -84,8 +84,9 @@ class _AnnCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = CT.of(context);
     final important = (v['prio'] as num? ?? 0) > 0;
-    final dlv = (v['dlv'] as Map?)?.length ?? 0;
-    final total = Hub.i.roster.length - 1;
+    final active = {for (final m in Hub.i.roster) if (m.id != Hub.i.me.id) m.id};
+    final dlv = ((v['dlv'] as Map?)?.keys ?? const []).where((k) => active.contains('$k')).length;
+    final total = active.length;
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
       decoration: brutalBox(context, color: important ? c.amberBg : c.card),

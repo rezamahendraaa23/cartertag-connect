@@ -72,16 +72,20 @@ function tlFbWarn() {
 /* ---- C01 Pengaturan: cukup bagikan 2 kode */
 var TL_JOIN_BASE = 'https://cartertag-connect.web.app/join?kode=';
 /** Link gabung: diklik di HP Android yang sudah pasang app -> app terbuka & langsung gabung; selain itu terbuka di web. */
-function tlJoinLink(code) { return TL_JOIN_BASE + 'CT-' + code; }
+/** r=d / r=k: app langsung tahu peran (driver ditanya nomor mobil di popup pertama, koordinator langsung masuk). */
+function tlJoinLink(code, label) {
+    var r = label ? (label.indexOf('Driver') !== -1 ? '&r=d' : '&r=k') : '';
+    return TL_JOIN_BASE + 'CT-' + code + r;
+}
 function tlShareText(label, code) {
     var k = findKonser(TL.slug), nama = k ? k.name : 'konser';
     var siapa = label.indexOf('Driver') !== -1 ? 'driver' : 'koordinator';
-    return 'Gabung tim CarterTag Connect (' + siapa + ') - ' + nama + '\n\nKlik link ini:\n' + tlJoinLink(code) +
+    return 'Gabung tim CarterTag Connect (' + siapa + ') - ' + nama + '\n\nKlik link ini:\n' + tlJoinLink(code, label) +
         '\n\nBelum punya app Android? Unduh: https://github.com/rezamahendraaa23/cartertag-connect/releases/latest' +
         '\nKode manual: CT-' + code;
 }
 function tlCodeCard(label, code, sub) {
-    var link = tlJoinLink(code);
+    var link = tlJoinLink(code, label);
     return '<div class="card"><div class="eyebrow">' + label + '</div><div class="tl-code"><b>CT-' + esc(code) + '</b>' +
         '<button class="btn ghost sm" onclick="copyText(\'CT-' + esc(code) + '\')">Salin kode</button>' +
         '<button class="btn ghost sm" onclick="copyText(\'' + esc(link) + '\')">Salin link</button>' +
@@ -162,7 +166,7 @@ function tlMonDraw() {
     var m = TL.mon, box = $('tlMon'); if (!box || !m) return;
     var at = $('tlMonAt'); if (at) at.textContent = 'Data per ' + new Date(m.at).toLocaleTimeString('id-ID');
     var names = {}; (m.members || []).forEach(function (x) { names[x.mid] = x; });
-    var cars = {}; (m.members || []).forEach(function (x) { if (x.r === 'driver') (x.cars && x.cars.length ? x.cars : [x.car]).forEach(function (c) { if (c) cars[c] = x; }); });
+    var cars = {}; (m.members || []).forEach(function (x) { if (x.r === 'driver' && (!x.st || x.st === 'aktif')) (x.cars && x.cars.length ? x.cars : [x.car]).forEach(function (c) { if (c) cars[c] = x; }); });
     var ck = m.checkins || {};
     Object.keys(ck).forEach(function (no) { if (!cars[no]) cars[no] = null; });   // mobil di manifest yang drivernya belum gabung
     var sos = Object.keys(m.sos || {}).map(function (k) { return Object.assign({ id: k }, m.sos[k]); }).filter(function (s) { return s.active; });

@@ -207,13 +207,16 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
 
 /// S04 — Gabung: nama + kode (+ nomor mobil untuk driver).
 class JoinScreen extends StatefulWidget {
-  const JoinScreen({super.key, this.initialCode, this.auto = false});
+  const JoinScreen({super.key, this.initialCode, this.auto = false, this.roleHint = ''});
 
   /// Kode dari link gabung / QR (boleh dengan atau tanpa "CT-").
   final String? initialCode;
 
-  /// true = langsung gabung (tanya nama kalau belum ada, tanya nomor mobil kalau kode driver).
+  /// true = langsung gabung lewat satu popup, tanpa menampilkan form (link / scan).
   final bool auto;
+
+  /// Peran dari link: 'd' driver (popup langsung tanya nomor mobil), 'k' koordinator, '' tidak diketahui (link lama).
+  final String roleHint;
   @override
   State<JoinScreen> createState() => _JoinScreenState();
 }
@@ -232,6 +235,9 @@ class _JoinScreenState extends State<JoinScreen> {
   bool showServer = false;
   bool needCar = false;
 
+  /// Mode cepat (link/scan): form disembunyikan, cukup popup. Kembali ke form kalau popup dibatalkan atau gabung gagal.
+  late bool quick = widget.auto;
+
   @override
   void initState() {
     super.initState();
@@ -245,11 +251,26 @@ class _JoinScreenState extends State<JoinScreen> {
     Future.wait([Hub.i.s.get<String>('profile_name'), Hub.i.s.get<String>('profile_hp')]).then((v) async {
       if (name.text.isEmpty) name.text = v[0] ?? '';
       if (hp.text.isEmpty) hp.text = v[1] ?? '';
-      if (!widget.auto || code.text.length != 6 || !mounted) return;
+      if (!widget.auto || !mounted) return;
+      if (code.text.length != 6) {
+        setState(() => quick = false);
+        return;
+      }
       await WidgetsBinding.instance.endOfFrame;
-      if (name.text.trim().isEmpty && !await _askProfile()) return;
-      if (mounted) await _submit(fromScan: true);
+      await _quickJoin(widget.roleHint);
     });
+  }
+
+  /// Gabung lewat link/scan: driver -> satu popup (nomor mobil + nama + HP); koordinator dengan nama tersimpan -> langsung masuk.
+  Future<void> _quickJoin(String role) async {
+    final driver = role == 'd';
+    if (driver || name.text.trim().isEmpty) {
+      if (!await _askJoin(driver: driver)) {
+        if (mounted) setState(() => quick = false);
+        return;
+      }
+    }
+    if (mounted) await _submit(fromScan: true);
   }
 
   /// Gabung. Kode driver tanpa nomor mobil -> server menolak dengan kode 'car' -> popup nomor mobil -> coba lagi.
@@ -275,6 +296,7 @@ class _JoinScreenState extends State<JoinScreen> {
         }
         setState(() {
           needCar = true;
+          quick = false;
           error = 'Kode ini untuk driver: isi nomor mobil.';
         });
         return;
@@ -282,10 +304,14 @@ class _JoinScreenState extends State<JoinScreen> {
       setState(() {
         error = e.message;
         offline = e.isNetwork;
+        quick = false;
         if (e.code == 'config') showServer = true;
       });
     } catch (e) {
-      setState(() => error = 'Gagal gabung: $e');
+      setState(() {
+        error = 'Gagal gabung: $e';
+        quick = false;
+      });
     } finally {
       if (mounted) setState(() => busy = false);
     }
@@ -315,21 +341,41 @@ class _JoinScreenState extends State<JoinScreen> {
     );
   }
 
-  /// Popup nama (+ HP opsional) untuk gabung pertama lewat scan.
-  Future<bool> _askProfile() async {
+  /// Popup gabung (link/scan): driver -> nomor mobil paling atas; lalu nama (terisi kalau pernah gabung) + HP opsional.
+  Future<bool> _askJoin({required bool driver}) async {
     final n = TextEditingController(text: name.text), h = TextEditingController(text: hp.text);
+    final cr = TextEditingController(text: carDigits(car.text));
     final key = GlobalKey<FormState>();
+    void done(BuildContext ctx) {
+      if (key.currentState!.validate()) Navigator.pop(ctx, true);
+    }
+
     final ok = await showDialog<bool>(
       context: context,
+      barrierDismissible: false,
       builder: (ctx) => AlertDialog(
-        title: const Text('Nama kamu'),
+        title: Text(driver ? 'Gabung sebagai driver' : 'Gabung tim'),
         content: Form(
           key: key,
           child: Column(mainAxisSize: MainAxisSize.min, children: [
+            if (driver) ...[
+              TextFormField(
+                controller: cr,
+                autofocus: true,
+                keyboardType: TextInputType.number,
+                textInputAction: TextInputAction.next,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(4)],
+                style: mono(22, w: FontWeight.w700),
+                decoration: const InputDecoration(labelText: 'Nomor mobil', prefixText: 'C ', hintText: '3', prefixIcon: Icon(LucideIcons.carFront)),
+                validator: (v) => (v ?? '').trim().isEmpty ? 'Isi nomor mobil' : null,
+              ),
+              const SizedBox(height: 12),
+            ],
             TextFormField(
               controller: n,
-              autofocus: true,
+              autofocus: !driver,
               textCapitalization: TextCapitalization.words,
+              textInputAction: TextInputAction.next,
               decoration: const InputDecoration(labelText: 'Nama', prefixIcon: Icon(LucideIcons.user)),
               validator: (v) => (v ?? '').trim().isEmpty ? 'Nama wajib diisi' : null,
             ),
@@ -339,35 +385,58 @@ class _JoinScreenState extends State<JoinScreen> {
               keyboardType: TextInputType.phone,
               decoration: const InputDecoration(labelText: 'Nomor HP (opsional)', prefixIcon: Icon(LucideIcons.phone)),
               validator: (v) => (v ?? '').trim().isNotEmpty && normHp(v!).isEmpty ? 'Nomor HP tidak valid' : null,
+              onFieldSubmitted: (_) => done(ctx),
             ),
           ]),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Batal')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, key.currentState!.validate()), child: const Text('Lanjut')),
+          FilledButton(onPressed: () => done(ctx), child: const Text('Gabung')),
         ],
       ),
     );
     if (ok != true) return false;
     name.text = n.text.trim();
     hp.text = h.text.trim();
+    if (driver) {
+      car.text = cr.text.trim();
+      needCar = true;
+    }
     return true;
   }
 
-  /// Scan QR: QR kode dari admin -> langsung gabung (driver ditanya nomor mobil); QR undangan -> alur gabung offline.
+  /// Scan QR: QR kode dari admin -> satu popup lalu langsung gabung; QR undangan -> alur gabung offline.
   Future<void> _scan() async {
     final r = await Navigator.of(context).push<String>(MaterialPageRoute(builder: (_) => const InviteScanScreen()));
     if (r == null || !mounted) return;
-    setState(() => code.text = r.toUpperCase().replaceFirst(RegExp(r'^CT-?'), ''));
-    if (name.text.trim().isEmpty && !await _askProfile()) return;
-    if (!mounted) return;
-    await _submit(fromScan: true);
+    final parts = r.split('|'); // "CT-XXXXXX|d" dari QR link baru
+    setState(() => code.text = parts.first.toUpperCase().replaceFirst(RegExp(r'^CT-?'), ''));
+    await _quickJoin(parts.length > 1 ? parts[1] : '');
   }
 
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context).textTheme;
     final c = CT.of(context);
+    // dari link/scan: cukup latar sederhana di belakang popup, tanpa form
+    if (quick) {
+      return Scaffold(
+        body: SafeArea(
+          child: Center(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Image.asset('assets/logo.png', width: 72, height: 72, semanticLabel: 'Logo CarterTag'),
+              const SizedBox(height: 20),
+              if (busy) ...[
+                const SizedBox(width: 28, height: 28, child: CircularProgressIndicator(strokeWidth: 3)),
+                const SizedBox(height: 14),
+                Text('Menggabungkan ke tim…', style: t.bodyLarge?.copyWith(color: c.muted)),
+              ] else
+                Text('Gabung tim CarterTag Connect', style: t.titleMedium),
+            ]),
+          ),
+        ),
+      );
+    }
     return Scaffold(
       appBar: AppBar(title: const Text('Gabung tim')),
       body: SafeArea(
@@ -571,7 +640,8 @@ class _InviteScanScreenState extends State<InviteScanScreen> {
       if (m != null) {
         _done = true;
         HapticFeedback.mediumImpact();
-        Navigator.of(context).pop('CT-${m.group(1)!.toUpperCase()}');
+        final r = link != null && link.path.startsWith('/join') ? (link.queryParameters['r'] ?? '') : '';
+        Navigator.of(context).pop('CT-${m.group(1)!.toUpperCase()}${r.isNotEmpty ? '|$r' : ''}');
         return;
       }
       try {

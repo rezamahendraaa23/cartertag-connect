@@ -343,7 +343,10 @@ class SosListScreen extends StatelessWidget {
       body: StreamBuilder<List<RecordSnapshot<String, Map<String, Object?>>>>(
         stream: h.watch(h.s.sos),
         builder: (context, snap) {
-          final list = (snap.data ?? const []).where((r) => r.value['active'] == true).toList();
+          // SOS dari anggota yang sudah keluar (pembatalannya bisa tidak sampai kalau dia keluar saat offline) tidak ditampilkan
+          final list = (snap.data ?? const [])
+              .where((r) => r.value['active'] == true && (r.value['from'] == h.me.id || h.member('${r.value['from']}') != null))
+              .toList();
           if (list.isEmpty) return const EmptyState(icon: LucideIcons.check, title: 'Tidak ada SOS aktif', text: 'Semua aman.');
           return ListView(children: [
             for (final r in list)

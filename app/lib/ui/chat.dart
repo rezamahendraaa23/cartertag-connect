@@ -47,7 +47,8 @@ class ChatListScreen extends StatelessWidget {
             if (r.value['mine'] != true) (counts[ch] ??= []).add((r.value['ts'] as num).toInt());
           }
           final groups = h.channels();
-          final dms = last.keys.where((k) => k.startsWith('d:')).map(h.channelById).toList()
+          // DM dengan anggota yang sudah keluar disembunyikan (muncul lagi kalau dia gabung kembali)
+          final dms = last.keys.where((k) => k.startsWith('d:')).map(h.channelById).where((ch) => ch.peer != null).toList()
             ..sort((a, b) => ((last[b.id]!['ts'] as num).compareTo(last[a.id]!['ts'] as num)));
           return ListView(padding: const EdgeInsets.only(bottom: 96), children: [
             Padding(
@@ -252,7 +253,7 @@ class _MembersScreenState extends State<MembersScreen> {
               return ListTile(
                 minTileHeight: 64,
                 leading: StatusAvatar(member: m),
-                title: Text(m.isDriver && m.car.isNotEmpty ? '${m.carLabel} · ${m.name}' : m.name, style: Theme.of(context).textTheme.titleMedium),
+                title: Text(m.displayName, style: Theme.of(context).textTheme.titleMedium),
                 subtitle: Text([m.roleLabel, if (m.area.isNotEmpty) 'Area ${m.area}', statusText(m)].join(' · '),
                     style: TextStyle(color: Hub.i.statusOf(m.id) == MemberStatus.online ? c.ok : null)),
                 trailing: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -978,7 +979,7 @@ class MessageInfoScreen extends StatelessWidget {
                 for (final x in members)
                   ListTile(
                     leading: Avatar(name: x.name, size: 40),
-                    title: Text(x.name),
+                    title: Text(x.displayName),
                     subtitle: Text(x.roleLabel),
                     trailing: Text(r.contains(x.id) ? 'Dibaca' : (d.contains(x.id) ? 'Sampai' : 'Belum'), style: const TextStyle(fontWeight: FontWeight.w700)),
                   ),

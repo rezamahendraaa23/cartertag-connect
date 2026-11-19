@@ -171,8 +171,41 @@ class _MeScreenState extends State<MeScreen> {
         leading: Icon(LucideIcons.logOut, color: c.danger),
         title: Text('Keluar & hapus data konser ini', style: TextStyle(color: c.danger, fontWeight: FontWeight.w700)),
         onTap: () async {
-          if (await confirm(context, title: 'Keluar dari konser?', text: 'Semua chat & data konser ini di HP ini dihapus. Tidak bisa dibatalkan.', action: 'Keluar & hapus', danger: true)) {
-            await h.leave();
+          if (h.leaving) return;
+          if (!await confirm(context, title: 'Keluar dari konser?', text: 'Semua chat & data konser ini di HP ini dihapus. Tidak bisa dibatalkan.', action: 'Keluar & hapus', danger: true)) {
+            return;
+          }
+          if (!context.mounted) return;
+          final nav = Navigator.of(context, rootNavigator: true);
+          final messenger = ScaffoldMessenger.maybeOf(context);
+          final progress = DialogRoute<void>(
+            context: context,
+            barrierDismissible: false,
+            builder: (_) => const PopScope(
+              canPop: false,
+              child: AlertDialog(
+                content: Row(children: [
+                  SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 3)),
+                  SizedBox(width: 16),
+                  Expanded(child: Text('Mengabari tim & menghapus data…')),
+                ]),
+              ),
+            ),
+          );
+          unawaited(nav.push(progress));
+          var reached = true;
+          try {
+            reached = await h.leave();
+          } catch (_) {
+            if (progress.isActive) nav.removeRoute(progress);
+            messenger?.showSnackBar(const SnackBar(content: Text('Gagal keluar. Coba lagi.')));
+            return;
+          }
+          if (progress.isActive) nav.removeRoute(progress);
+          if (!reached) {
+            messenger?.showSnackBar(const SnackBar(
+                content: Text('Kamu sudah keluar. Tim lain baru melihatnya setelah HP ini tersambung internet atau dekat HP tim.'),
+                duration: Duration(seconds: 6)));
           }
         },
       ),

@@ -73,7 +73,7 @@ class _RadarScreenState extends State<RadarScreen> {
         final locs = snap.data ?? const [];
         final targets = <Target>[
           for (final r in locs)
-            if (r.value['mid'] != h.me.id)
+            if (r.value['mid'] != h.me.id && h.member('${r.value['mid']}') != null) // yang sudah keluar tidak ditampilkan
               Target(
                 id: '${r.value['mid']}',
                 name: h.member('${r.value['mid']}')?.name ?? 'Anggota',

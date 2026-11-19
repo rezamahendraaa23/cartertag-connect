@@ -23,6 +23,9 @@ class Member {
   /// Label untuk tag di grup: driver = "Mobil 3", lainnya = nama.
   String get tagLabel => isDriver && car.isNotEmpty ? carLabel : name;
 
+  /// Nama + mobil untuk daftar & judul chat pribadi: "Reza Mahendra - C3" (bukan driver: nama saja).
+  String get displayName => isDriver && car.isNotEmpty ? '$name - $carLabel' : name;
+
   /// Nomor mobil untuk ditampilkan: "3" -> "C3" (yang sudah berhuruf dibiarkan).
   String get carLabel => carName(car);
 

@@ -20,7 +20,11 @@ import 'ui/root.dart';
 Future<void> _fcmBackground(RemoteMessage m) async {
   final d = m.data;
   // pengirim ikut berlangganan topik: abaikan push dari diri sendiri
-  if ((await readMyIdsFile()).contains('${d['from'] ?? ''}')) return;
+  final mine = await readMyIdsFile();
+  if (mine.contains('${d['from'] ?? ''}')) return;
+  // konser yang sudah ditinggalkan (langganan topik belum sempat dilepas karena offline): abaikan
+  final slug = '${d['slug'] ?? ''}';
+  if (mine.contains('v2') && slug.isNotEmpty && !mine.contains('slug:$slug')) return;
   final p = FlutterLocalNotificationsPlugin();
   await p.initialize(settings: const InitializationSettings(android: AndroidInitializationSettings('@mipmap/ic_launcher')));
   final kind = d['kind'] ?? 'msg';
@@ -95,7 +99,10 @@ class _ConnectAppState extends State<ConnectApp> {
       if (kIsWeb) {
         // halaman web dibuka dari link gabung: https://cartertag-connect.web.app/join?kode=CT-XXXXXX
         final u = Uri.base;
-        if (u.path.startsWith('/join')) Hub.i.pendingRoute.value = 'join:${u.queryParameters['kode'] ?? u.queryParameters['k'] ?? ''}';
+        if (u.path.startsWith('/join')) {
+          final r = u.queryParameters['r'] ?? '';
+          Hub.i.pendingRoute.value = 'join:${u.queryParameters['kode'] ?? u.queryParameters['k'] ?? ''}${r.isNotEmpty ? '|$r' : ''}';
+        }
       } else {
         try {
           final r = await route.invokeMethod<String>('initial');
@@ -110,10 +117,13 @@ class _ConnectAppState extends State<ConnectApp> {
     final r = Hub.i.pendingRoute.value;
     if (r == null || !r.startsWith('join:')) return;
     Hub.i.pendingRoute.value = null;
-    final code = r.substring(5);
+    // "join:CT-XXXXXX|d" -> kode + peran dari link (d = driver, k = koordinator; kosong = link lama)
+    final parts = r.substring(5).split('|');
+    final code = parts.first;
+    final role = parts.length > 1 ? parts[1] : '';
     final ctx = navKey.currentContext;
     if (ctx == null) return;
-    openPermissionsThen(ctx, JoinScreen(initialCode: code, auto: code.isNotEmpty));
+    openPermissionsThen(ctx, JoinScreen(initialCode: code, auto: code.isNotEmpty, roleHint: role));
   }
 
   @override
