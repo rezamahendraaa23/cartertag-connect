@@ -141,45 +141,50 @@ function tlKick(mid, nama) {
 }
 /* ---- C03 Monitor */
 function tlDrawMonitor(b) {
-    b.innerHTML = tlFbWarn() + '<div id="tlMon"><div class="dlg-loading" style="min-height:20vh"><span class="spin"></span><span>Memuat monitor…</span></div></div>';
+    // Tanpa refresh otomatis (hemat kuota GAS): data dimuat saat tab dibuka, selanjutnya lewat tombol Perbarui.
+    b.innerHTML = tlFbWarn() + '<div class="tl-row" style="justify-content:space-between;margin-bottom:12px"><span class="hint" id="tlMonAt"></span>' +
+        '<button class="btn sm" id="tlMonBtn" onclick="tlMonLoad()">Perbarui</button></div>' +
+        '<div id="tlMon"><div class="dlg-loading" style="min-height:20vh"><span class="spin"></span><span>Memuat monitor…</span></div></div>';
     if (!TL.data.firebase) return;
-    var load = function () {
-        if (view.name !== 'timlapangan' || TL.tab !== 'monitor') return clearInterval(TL.monTimer);
-        QUIET++;
-        var p = api('adminConnectMonitor', TL.slug);
-        QUIET--;
-        p.then(function (r) { if (!r.success) throw new Error(r.message); TL.mon = r.data; tlMonDraw(); }).catch(showErr('tlMon'));
-    };
-    load(); TL.monTimer = setInterval(load, 10000);
+    tlMonLoad();
+}
+function tlMonLoad() {
+    var btn = $('tlMonBtn'); if (btn) { btn.disabled = true; btn.textContent = 'Memuat…'; }
+    api('adminConnectMonitor', TL.slug).then(function (r) { if (!r.success) throw new Error(r.message); TL.mon = r.data; tlMonDraw(); })
+        .catch(showErr('tlMon'))
+        .then(function () { var b2 = $('tlMonBtn'); if (b2) { b2.disabled = false; b2.textContent = 'Perbarui'; } });
 }
 function tlMonDraw() {
     var m = TL.mon, box = $('tlMon'); if (!box || !m) return;
+    var at = $('tlMonAt'); if (at) at.textContent = 'Data per ' + new Date(m.at).toLocaleTimeString('id-ID');
     var names = {}; (m.members || []).forEach(function (x) { names[x.mid] = x; });
     var cars = {}; (m.members || []).forEach(function (x) { if (x.r === 'driver') (x.cars && x.cars.length ? x.cars : [x.car]).forEach(function (c) { if (c) cars[c] = x; }); });
-    var fleet = m.fleet || {}, now = Date.now();
+    var ck = m.checkins || {};
+    Object.keys(ck).forEach(function (no) { if (!cars[no]) cars[no] = null; });   // mobil di manifest yang drivernya belum gabung
     var sos = Object.keys(m.sos || {}).map(function (k) { return Object.assign({ id: k }, m.sos[k]); }).filter(function (s) { return s.active; });
-    var legOf = new Date().getHours() < 15 ? 'pergi' : 'pulang';
-    var count = { jalan: 0, tiba: 0, kendala: 0, sepi: 0 };
+    var tot = { pergi: { naik: 0, pax: 0 }, pulang: { naik: 0, pax: 0 } }, belumMobil = 0, online = 0;
+    function leg(c, l) {
+        if (!c || !c[l].pax) return '<span class="hint">' + (l === 'pergi' ? 'Pergi' : 'Pulang') + ' -</span>';
+        var x = c[l], cls = x.belum === 0 ? 'ok' : 'warn';
+        return '<span class="tl-st ' + cls + '">' + (l === 'pergi' ? 'Pergi' : 'Pulang') + ' ' + x.naik + '/' + x.pax + (x.belum ? ' · ' + x.belum + ' belum' : '') + '</span>';
+    }
     var cards = Object.keys(cars).sort(function (a, b) { return (parseInt(a, 10) || 999) - (parseInt(b, 10) || 999); }).map(function (no) {
-        var f = fleet[no + '_' + legOf] || null, d = cars[no], p = (m.presence || {})[d.mid] || {};
-        if (f && tlConcertDay(f.at) !== tlConcertDay(now)) f = null;   // status hari konser sebelumnya (hari konser mulai 06.00)
-        var stale = f && ['menuju', 'di_titik', 'berangkat'].indexOf(f.st) !== -1 && now - f.at > 15 * 60000;
-        var cls = !f ? '' : (f.st === 'kendala' ? 'bad' : (stale ? 'warn' : (f.st === 'tiba' || f.st === 'selesai' ? 'ok' : 'info')));
-        if (f && f.st === 'kendala') count.kendala++; else if (stale) count.sepi++; else if (f && (f.st === 'tiba' || f.st === 'selesai')) count.tiba++; else if (f) count.jalan++;
-        return '<div class="card tl-car"><div class="tl-row"><span class="no">' + esc(no) + '</span><div style="flex:1;min-width:0"><b>' + esc(d.n) + '</b><br><span class="hint">' + esc([d.plat, d.area].filter(Boolean).join(' · ')) + '</span></div></div>' +
-            '<div class="tl-row" style="margin-top:8px"><span class="tl-st ' + cls + '">' + (stale ? 'Tidak ada kabar' : (f ? esc(TL_STATUS[f.st] || f.st) : 'Belum lapor')) + '</span>' +
-            '<span class="hint">' + (f ? tlAgo(f.at) : '') + (p.bat ? ' · baterai ' + p.bat + '%' : '') + (p.on ? ' · online' : '') + '</span></div>' +
-            (f && f.note ? '<div class="hint" style="margin-top:6px">' + esc(f.note) + '</div>' : '') + '</div>';
+        var d = cars[no], c = ck[no], p = d ? ((m.presence || {})[d.mid] || {}) : {};
+        if (c) { ['pergi', 'pulang'].forEach(function (l) { tot[l].naik += c[l].naik; tot[l].pax += c[l].pax; }); if (c.pergi.belum || c.pulang.belum) belumMobil++; }
+        if (p.on) online++;
+        return '<div class="card tl-car"><div class="tl-row"><span class="no">C' + esc(no) + '</span><div style="flex:1;min-width:0"><b>' + esc(d ? d.n : 'Driver belum gabung') + '</b><br><span class="hint">' + esc(d ? [d.plat, d.area].filter(Boolean).join(' · ') : '') + '</span></div></div>' +
+            '<div class="tl-row" style="margin-top:8px">' + leg(c, 'pergi') + leg(c, 'pulang') + '</div>' +
+            '<div class="hint" style="margin-top:6px">' + (p.on ? 'online' : (p.ls ? 'terakhir online ' + tlAgo(p.ls) : 'belum online')) + (p.bat ? ' · baterai ' + p.bat + '%' : '') + '</div></div>';
     });
     box.innerHTML = (sos.length ? '<div class="card tl-sos"><h3 style="margin:0 0 8px">SOS aktif (' + sos.length + ')</h3>' + sos.map(function (s) {
         return '<div class="tl-row" style="margin-bottom:6px"><b>' + esc(s.name || (names[s.by] || {}).n || s.by) + '</b><span class="tl-st bad">' + esc((s.kind || 'darurat').toUpperCase()) + '</span>' +
             '<span class="hint">' + tlAgo(s.at) + (s.bat ? ' · baterai ' + s.bat + '%' : '') + '</span>' +
             (s.lat ? '<a href="https://www.google.com/maps/search/?api=1&query=' + s.lat + ',' + s.lng + '" target="_blank" rel="noopener">Lihat di peta &rarr;</a>' : '') + '</div>';
     }).join('') + '</div>' : '') +
-        '<div class="kpis">' + kpi('Mobil', Object.keys(cars).length, 'leg ' + legOf) + kpi('Di jalan', count.jalan, '') + kpi('Tiba', count.tiba, '', count.tiba ? 'ok' : '') +
-        kpi('Kendala / tanpa kabar', count.kendala + ' / ' + count.sepi, '', count.kendala ? 'warn' : '') + '</div>' +
-        '<div class="tl-grid">' + (cards.join('') || '<div class="card hint">Belum ada mobil di Plotingan.</div>') + '</div>' +
-        '<p class="hint">Diperbarui ' + new Date(m.at).toLocaleTimeString('id-ID') + ' · otomatis tiap 10 detik. Status dari HP yang offline muncul setelah ada HP tim yang online (gateway).</p>';
+        '<div class="kpis">' + kpi('Mobil', Object.keys(cars).length, online + ' driver online') + kpi('Pergi naik', tot.pergi.naik + '/' + tot.pergi.pax, 'penumpang') +
+        kpi('Pulang naik', tot.pulang.naik + '/' + tot.pulang.pax, 'penumpang') + kpi('Belum lengkap', belumMobil, 'mobil', belumMobil ? 'warn' : '') + '</div>' +
+        '<div class="tl-grid">' + (cards.join('') || '<div class="card hint">Belum ada mobil.</div>') + '</div>' +
+        '<p class="hint">Data per ' + new Date(m.at).toLocaleTimeString('id-ID') + ' · klik Perbarui untuk data terbaru. Centang penumpang dari HP yang offline muncul setelah HP itu (atau koordinator) online. Posisi driver: pantau share live di grup WhatsApp.</p>';
 }
 /** Hari konser dimulai 06.00 (pulang lewat tengah malam tetap hari yang sama dengan pergi). */
 function tlConcertDay(ms) { var d = new Date(ms - 6 * 3600000); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }

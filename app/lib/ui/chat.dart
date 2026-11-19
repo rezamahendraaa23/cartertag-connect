@@ -978,12 +978,12 @@ class QuickSheet extends StatelessWidget {
   const QuickSheet({super.key});
 
   static const driver = [
-    ('di_titik', 'Sudah di titik jemput', LucideIcons.mapPinned, 'di_titik'),
-    ('berangkat', 'Berangkat', LucideIcons.navigation, 'berangkat'),
-    ('tiba', 'Tiba di venue', LucideIcons.check, 'tiba'),
+    ('di_titik', 'Sudah di titik jemput', LucideIcons.mapPinned, null),
+    ('berangkat', 'Berangkat', LucideIcons.navigation, null),
+    ('tiba', 'Tiba di venue', LucideIcons.check, null),
     ('macet', 'Macet ±15 menit', LucideIcons.clock, null),
     ('kurang', 'Penumpang kurang', LucideIcons.users, null),
-    ('mogok', 'Mobil bermasalah', LucideIcons.wrench, 'kendala'),
+    ('mogok', 'Mobil bermasalah', LucideIcons.wrench, null),
     ('bantuan', 'Butuh bantuan', LucideIcons.circleAlert, null),
   ];
   static const panitia = [
@@ -1015,7 +1015,7 @@ class QuickSheet extends StatelessWidget {
                 PressBox(
                   padding: const EdgeInsets.all(10),
                   semantics: it.$2,
-                  color: it.$4 == 'kendala' ? CT.of(context).dangerBg : null,
+                  color: it.$1 == 'mogok' || it.$1 == 'bantuan' ? CT.of(context).dangerBg : null,
                   onTap: () => Navigator.pop(context, (it.$1, it.$2, it.$4)),
                   child: Row(children: [
                     Icon(it.$3, size: 20),
@@ -1023,7 +1023,6 @@ class QuickSheet extends StatelessWidget {
                     Expanded(
                       child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
                         Text(it.$2, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
-                        if (it.$4 != null) Text('+ update status', style: mono(10)),
                       ]),
                     ),
                   ]),

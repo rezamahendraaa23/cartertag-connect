@@ -714,7 +714,48 @@ function adminConnectAnnounce(token, slug, ann) {
   });
 }
 
-/** Daftar pengumuman Console + papan armada + SOS aktif + presence (dari RTDB). */
+/** Hari konser (mulai 06.00): pulang lewat tengah malam tetap hari yang sama dengan pergi. */
+function connectConcertDay_(ms) {
+  return Utilities.formatDate(new Date(ms - 6 * 3600000), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+}
+
+/**
+ * Rekap check-in penumpang hari konser ini per mobil: {mobil: {pergi: {naik, pax, belum}, pulang: {...}}}.
+ * Dari manifest + tab Checkin Penumpang (yang tersinkron dari HP). Di-cache 30 detik supaya Monitor tidak membebani GAS.
+ */
+function connectCheckinCounts_(cfg) {
+  var key = 'CT_CK_' + _konser.slug, cache = CacheService.getScriptCache();
+  try { var hit = cache.get(key); if (hit) return JSON.parse(hit); } catch (e) { /* hitung ulang */ }
+  var man = connectManifest_(cfg), out = {};
+  if (!man.enabled) return out;
+  var today = connectConcertDay_(Date.now());
+  var days = {};
+  man.rows.forEach(function (r) { if (r.hari) days[r.hari] = 1; });
+  var multi = Object.keys(days).length > 1;
+  var latest = {};
+  readTableIn_(connectSs_(), CONNECT_TAB.CHECKIN).forEach(function (c) {
+    var t = new Date(String(c.waktu)).getTime();
+    if (!t || connectConcertDay_(t) !== today) return;
+    var k = String(c.order_id) + '|' + String(c.hari) + '|' + String(c.leg);
+    if (!latest[k] || latest[k].t < t) latest[k] = { t: t, st: String(c.status) };
+  });
+  man.rows.forEach(function (r) {
+    if (multi && r.hari && r.hari !== today) return;
+    var trip = String(r.trip || '').toLowerCase();
+    var legs = trip.indexOf('one') !== -1 ? (trip.indexOf('pulang') !== -1 && trip.indexOf('pergi') === -1 ? ['pulang'] : ['pergi']) : ['pergi', 'pulang'];
+    var car = out[r.car] = out[r.car] || { pergi: { naik: 0, pax: 0, belum: 0 }, pulang: { naik: 0, pax: 0, belum: 0 } };
+    legs.forEach(function (leg) {
+      var ck = latest[r.order_id + '|' + r.hari + '|' + leg];
+      car[leg].pax += r.pax;
+      if (!ck) car[leg].belum++;
+      else if (ck.st === 'naik') car[leg].naik += r.pax;
+    });
+  });
+  try { cache.put(key, JSON.stringify(out), 30); } catch (e) { /* abaikan */ }
+  return out;
+}
+
+/** Monitor: rekap penumpang per mobil + SOS aktif + presence + pengumuman. */
 function adminConnectMonitor(token, slug) {
   return adminGuard_(token, function () {
     adminNeed_('timlapangan:view');
@@ -724,7 +765,7 @@ function adminConnectMonitor(token, slug) {
     var team = connectTeam_();
     return { success: true, data: {
       firebase: true,
-      fleet: connectRtdb_('GET', base + 'fleet') || {},
+      checkins: connectCheckinCounts_(connectCfg_(_konser)),
       sos: connectRtdb_('GET', base + 'sos') || {},
       presence: connectRtdb_('GET', base + 'presence') || {},
       ann: connectRtdb_('GET', base + 'ann') || {},
