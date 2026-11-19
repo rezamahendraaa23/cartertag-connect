@@ -117,10 +117,14 @@ class Online {
 
       _subs.add(_db!.ref('c/${c.slug}/presence').onChildAdded.listen(loc, onError: (_) {}));
       _subs.add(_db!.ref('c/${c.slug}/presence').onChildChanged.listen(loc, onError: (_) {}));
-      _subs.add(_db!.ref('c/${c.slug}/ann').onChildAdded.listen((e) {
+      void ann(DatabaseEvent e) {
         final v = e.snapshot.value;
         if (v is Map) _annCtl.add(v.cast<String, dynamic>());
-      }, onError: (_) {}));
+      }
+
+      // onChildChanged: pengumuman dihapus dari Console ditandai 'del'
+      _subs.add(_db!.ref('c/${c.slug}/ann').onChildAdded.listen(ann, onError: (_) {}));
+      _subs.add(_db!.ref('c/${c.slug}/ann').onChildChanged.listen(ann, onError: (_) {}));
       return true;
     } catch (e) {
       debugPrint('Online.attach gagal: $e');

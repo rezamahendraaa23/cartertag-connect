@@ -34,7 +34,9 @@ class FleetData {
   /// Check-in penumpang (hari konser ini saja).
   String? checkin(ManifestRow r, String leg) {
     final v = checkins['${r.orderId}|${r.hari}|$leg'];
-    return v != null && Hub.isCurrent(v['at'] as num?) ? v['st'] as String? : null;
+    // 'batal' = centang dikosongkan (driver salah nomor mobil) -> dianggap belum
+    final st = v != null && Hub.isCurrent(v['at'] as num?) ? v['st'] as String? : null;
+    return st == null || st.isEmpty || st == 'batal' ? null : st;
   }
 
   /// Semua penumpang leg Pergi mobil ini sudah dicentang (Naik / Tidak datang)? Syarat leg Pulang terbuka.
@@ -227,7 +229,7 @@ class _CarCard extends StatelessWidget {
     final naik = rows.where((r) => d.checkin(r, leg) == 'naik').fold<int>(0, (a, r) => a + r.pax);
     final belum = rows.where((r) => d.checkin(r, leg) == null).length;
     final dr = driver;
-    final peer = dr == null ? null : Hub.i.meshPeersList.where((p) => p.memberId == dr.id).firstOrNull;
+    final peer = dr == null ? null : Hub.i.meshPeersList.where((p) => p.connected && p.memberId == dr.id).firstOrNull;
     final area = dr?.area ?? rows.where((r) => r.area.isNotEmpty).map((r) => r.area).firstOrNull ?? '';
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),

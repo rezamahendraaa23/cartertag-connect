@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -11,6 +12,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../core/ids.dart';
 import '../core/theme.dart';
+import '../data/models.dart';
 import '../main.dart';
 import '../services/hub.dart';
 import '../services/mesh.dart';
@@ -18,6 +20,63 @@ import '../services/online.dart';
 import '../services/updater.dart';
 import 'root.dart';
 import 'widgets.dart';
+
+/// Keluar dari konser (dipakai tombol di header layar utama & di Saya): konfirmasi -> layar progres -> hasil.
+bool _leaveFlowOpen = false;
+
+Future<void> leaveConcertFlow(BuildContext context) async {
+  final h = Hub.i;
+  // dua ketukan cepat: jangan buka dua konfirmasi
+  if (_leaveFlowOpen || h.leaving || h.concert == null) return;
+  _leaveFlowOpen = true;
+  try {
+    await _leaveConcertFlow(context);
+  } finally {
+    _leaveFlowOpen = false;
+  }
+}
+
+Future<void> _leaveConcertFlow(BuildContext context) async {
+  final h = Hub.i;
+  if (!await confirm(context,
+      title: 'Keluar dari ${h.concert!.name}?',
+      text: 'Semua chat & data konser ini di HP ini dihapus. Tidak bisa dibatalkan. Bisa gabung lagi pakai kode / link.',
+      action: 'Keluar & hapus',
+      danger: true)) {
+    return;
+  }
+  if (!context.mounted || h.concert == null) return;
+  final nav = Navigator.of(context, rootNavigator: true);
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final progress = DialogRoute<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => const PopScope(
+      canPop: false,
+      child: AlertDialog(
+        content: Row(children: [
+          SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 3)),
+          SizedBox(width: 16),
+          Expanded(child: Text('Mengabari tim & menghapus data…')),
+        ]),
+      ),
+    ),
+  );
+  unawaited(nav.push(progress));
+  var reached = true;
+  try {
+    reached = await h.leave();
+  } catch (_) {
+    if (progress.isActive) nav.removeRoute(progress);
+    messenger?.showSnackBar(const SnackBar(content: Text('Gagal keluar. Coba lagi.')));
+    return;
+  }
+  if (progress.isActive) nav.removeRoute(progress);
+  if (!reached) {
+    messenger?.showSnackBar(const SnackBar(
+        content: Text('Kamu sudah keluar. Tim lain baru melihatnya setelah HP ini tersambung internet atau dekat HP tim.'), duration: Duration(seconds: 6)));
+  }
+}
 
 /// S24 — Saya: profil & pengaturan.
 class MeScreen extends StatefulWidget {
@@ -35,6 +94,60 @@ class _MeScreenState extends State<MeScreen> {
     super.initState();
     Hub.i.s.get<bool>('power_save').then((v) => setState(() => powerSave = v ?? false));
     Hub.i.s.get<String>('theme').then((v) => setState(() => theme = v ?? 'system'));
+  }
+
+  /// Driver salah isi nomor mobil: ganti tanpa keluar. Daftar penumpang ikut berganti ke mobil baru (manifest dari server).
+  Future<void> _changeCar(BuildContext context) async {
+    final h = Hub.i;
+    final old = h.me.car;
+    // centang penumpang yang sudah terlanjur diisi di mobil lama
+    final done = (await h.myCheckinsOnCar(old)).length;
+    if (!context.mounted) return;
+    final ctl = TextEditingController();
+    final car = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Ganti nomor mobil'),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('Sekarang: ${carName(old)}'),
+          const SizedBox(height: 12),
+          TextField(
+            controller: ctl,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(4)],
+            style: mono(22, w: FontWeight.w700),
+            decoration: const InputDecoration(labelText: 'Nomor mobil yang benar', prefixText: 'C ', hintText: '3'),
+          ),
+          const SizedBox(height: 12),
+          Text('Daftar penumpang di HP kamu ikut berganti ke mobil yang baru, dan tim melihat nomor mobil barumu.',
+              style: Theme.of(context).textTheme.bodySmall),
+          if (done > 0) ...[
+            const SizedBox(height: 8),
+            Text('$done centang penumpang yang kamu isi di ${carName(old)} akan dikosongkan lagi, supaya penumpang mobil itu tidak dikira sudah naik.',
+                style: TextStyle(fontSize: 12.5, color: CT.of(context).amber, fontWeight: FontWeight.w600)),
+          ],
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Batal')),
+          FilledButton(
+            onPressed: () {
+              final v = ctl.text.trim();
+              if (v.isNotEmpty && v != carDigits(old)) Navigator.pop(ctx, v);
+            },
+            child: const Text('Ganti'),
+          ),
+        ],
+      ),
+    );
+    if (car == null || !context.mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    try {
+      await h.changeCar(car);
+      messenger?.showSnackBar(SnackBar(content: Text('Nomor mobil diganti ke ${carName(car)}. Daftar penumpang sudah diperbarui.')));
+    } catch (e) {
+      messenger?.showSnackBar(SnackBar(content: Text('Gagal ganti nomor mobil: $e')));
+    }
   }
 
   @override
@@ -159,6 +272,16 @@ class _MeScreenState extends State<MeScreen> {
           if (context.mounted) toast(context, 'Data diperbarui');
         },
       ),
+      if (me.isDriver)
+        ListTile(
+          minTileHeight: 56,
+          leading: const Icon(LucideIcons.squarePen),
+          title: Text('Nomor mobil: ${me.car.isEmpty ? '-' : me.carLabel}'),
+          subtitle: Text(h.netUp ? 'Salah isi? Ganti tanpa keluar dari konser' : 'Ganti nomor mobil butuh internet'),
+          trailing: const Icon(LucideIcons.chevronRight),
+          enabled: h.netUp,
+          onTap: () => _changeCar(context),
+        ),
       ListTile(
         minTileHeight: 56,
         leading: const Icon(LucideIcons.carFront),
@@ -170,44 +293,7 @@ class _MeScreenState extends State<MeScreen> {
         minTileHeight: 56,
         leading: Icon(LucideIcons.logOut, color: c.danger),
         title: Text('Keluar & hapus data konser ini', style: TextStyle(color: c.danger, fontWeight: FontWeight.w700)),
-        onTap: () async {
-          if (h.leaving) return;
-          if (!await confirm(context, title: 'Keluar dari konser?', text: 'Semua chat & data konser ini di HP ini dihapus. Tidak bisa dibatalkan.', action: 'Keluar & hapus', danger: true)) {
-            return;
-          }
-          if (!context.mounted) return;
-          final nav = Navigator.of(context, rootNavigator: true);
-          final messenger = ScaffoldMessenger.maybeOf(context);
-          final progress = DialogRoute<void>(
-            context: context,
-            barrierDismissible: false,
-            builder: (_) => const PopScope(
-              canPop: false,
-              child: AlertDialog(
-                content: Row(children: [
-                  SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 3)),
-                  SizedBox(width: 16),
-                  Expanded(child: Text('Mengabari tim & menghapus data…')),
-                ]),
-              ),
-            ),
-          );
-          unawaited(nav.push(progress));
-          var reached = true;
-          try {
-            reached = await h.leave();
-          } catch (_) {
-            if (progress.isActive) nav.removeRoute(progress);
-            messenger?.showSnackBar(const SnackBar(content: Text('Gagal keluar. Coba lagi.')));
-            return;
-          }
-          if (progress.isActive) nav.removeRoute(progress);
-          if (!reached) {
-            messenger?.showSnackBar(const SnackBar(
-                content: Text('Kamu sudah keluar. Tim lain baru melihatnya setelah HP ini tersambung internet atau dekat HP tim.'),
-                duration: Duration(seconds: 6)));
-          }
-        },
+        onTap: () => leaveConcertFlow(context),
       ),
       if (!kIsWeb)
         ListenableBuilder(
@@ -316,7 +402,8 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       listenable: Hub.i,
       builder: (context, _) {
         final h = Hub.i;
-        final peers = h.meshPeersList;
+        // hanya link aktif (daftar service juga memuat HP yang sekadar terlihat di scan)
+        final peers = h.meshPeersList.where((p) => p.connected).toList();
         return Scaffold(
           appBar: AppBar(title: const Text('Koneksi')),
           body: ListView(padding: const EdgeInsets.only(bottom: 32), children: [

@@ -48,6 +48,7 @@ var CONNECT_ACTIONS_ = {
   join: function (b) { return connectJoin_(b); },
   refresh: function (b) { return connectRefresh_(b); },
   leave: function (b) { return connectLeave_(b); },
+  ann_del: function (b) { return connectAnnDel_(b); },
   notify: function (b) { return connectNotify_(b); },
   media_upload: function (b) { return connectMediaUpload_(b); },
   media_get: function (b) { return connectMediaGet_(b); },
@@ -413,6 +414,19 @@ function connectRefresh_(b) {
   return connectBundle_(a.konser, a.cfg, a.team, me);
 }
 
+/** Koordinator menghapus pengumuman Console dari app: tandai del di RTDB (sama seperti hapus dari Console). */
+function connectAnnDel_(b) {
+  var a = connectAuth_(b.member_token);
+  if (a.me.role !== 'koordinator') throw connectError_('forbidden', 'Hanya koordinator yang bisa menghapus pengumuman.');
+  var id = String(b.id || '');
+  if (!/^ann_[A-Za-z0-9_-]{4,40}$/.test(id)) throw connectError_('id', 'ID pengumuman tidak valid.');
+  if (!connectFirebaseReady_()) return { deleted: false };
+  var path = 'c/' + a.konser.slug + '/ann/' + id;
+  if (!connectRtdb_('GET', path)) return { deleted: false };   // bukan pengumuman Console
+  connectRtdb_('PATCH', path, { del: Date.now(), del_by: a.me.nama });
+  return { deleted: true };
+}
+
 /** Anggota menekan "Keluar & hapus konser" di app: tandai keluar (boleh gabung lagi, beda dengan dikeluarkan admin). */
 function connectLeave_(b) {
   var parts = String(b.member_token || '').split('.');
@@ -569,7 +583,8 @@ function connectSyncReports_(b) {
       if (seen[id]) return;
       seen[id] = 1;
       chkRows.push({ event_id: id, order_id: cap_(c.order_id, 30), hari: cap_(c.hari, 12), leg: c.leg === 'pulang' ? 'pulang' : 'pergi',
-        status: c.status === 'tidak_datang' ? 'tidak_datang' : 'naik', nomor_mobil: cap_(c.car, 10), oleh: cap_(c.by || me.member_id, 20), waktu: cap_(c.at, 25), synced_at: now });
+        // batal = centang dikosongkan (mis. driver salah nomor mobil lalu menggantinya)
+        status: c.status === 'tidak_datang' ? 'tidak_datang' : (c.status === 'batal' ? 'batal' : 'naik'), nomor_mobil: cap_(c.car, 10), oleh: cap_(c.by || me.member_id, 20), waktu: cap_(c.at, 25), synced_at: now });
     });
     connectAppendRows_(ss, CONNECT_TAB.FLEET, fleetRows);
     connectAppendRows_(ss, CONNECT_TAB.CHECKIN, chkRows);
@@ -768,6 +783,24 @@ function adminConnectAnnounce(token, slug, ann) {
   });
 }
 
+/**
+ * Hapus pengumuman Console. Tidak dihapus dari RTDB tapi ditandai del (app yang online menerimanya lewat onChildChanged,
+ * menghapus lokal, lalu meneruskan penghapusan ke HP offline lewat mesh).
+ */
+function adminConnectAnnDelete(token, slug, id) {
+  return adminGuard_(token, function () {
+    adminNeed_('timlapangan:edit');
+    adminUse_(slug);
+    if (!connectFirebaseReady_()) throw new Error('Firebase belum diatur.');
+    id = String(id || '');
+    if (!/^ann_[A-Za-z0-9_-]{4,40}$/.test(id)) throw new Error('ID pengumuman tidak valid.');
+    var cur = connectRtdb_('GET', 'c/' + _konser.slug + '/ann/' + id);
+    if (!cur) throw new Error('Pengumuman tidak ditemukan.');
+    connectRtdb_('PATCH', 'c/' + _konser.slug + '/ann/' + id, { del: Date.now(), del_by: _actor ? _actor.name : 'Admin' });
+    return { success: true };
+  });
+}
+
 /** Hari konser (mulai 06.00): pulang lewat tengah malam tetap hari yang sama dengan pergi. */
 function connectConcertDay_(ms) {
   return Utilities.formatDate(new Date(ms - 6 * 3600000), Session.getScriptTimeZone(), 'yyyy-MM-dd');
@@ -801,7 +834,7 @@ function connectCheckinCounts_(cfg) {
     legs.forEach(function (leg) {
       var ck = latest[r.order_id + '|' + r.hari + '|' + leg];
       car[leg].pax += r.pax;
-      if (!ck) car[leg].belum++;
+      if (!ck || ck.st === 'batal') car[leg].belum++;
       else if (ck.st === 'naik') car[leg].naik += r.pax;
     });
   });

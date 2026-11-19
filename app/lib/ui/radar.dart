@@ -14,6 +14,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../core/theme.dart';
 import '../services/hub.dart';
 import '../services/location.dart';
+import 'reach.dart';
 import 'widgets.dart';
 
 class Target {
@@ -41,6 +42,7 @@ class RadarScreen extends StatefulWidget {
 class _RadarScreenState extends State<RadarScreen> {
   Fix? me = LocationSvc.i.last;
   bool share = true;
+  bool showMap = false;
   late final _locs = Hub.i.watch(Hub.i.s.locations);
   Timer? _t;
 
@@ -89,6 +91,9 @@ class _RadarScreenState extends State<RadarScreen> {
           targets.sort((a, b) => haversine(f.lat, f.lng, a.lat, a.lng).compareTo(haversine(f.lat, f.lng, b.lat, b.lng)));
         }
         return ListView(padding: const EdgeInsets.only(bottom: 32), children: [
+          // Jangkauan Tim: sinyal Bluetooth nyata ke HP tim (utama) + peringatan native
+          const ReachPanel(),
+          const SectionLabel('Posisi tim (GPS)'),
           if (LocationSvc.i.denied || f == null)
             InfoBanner(
               tone: Tone.warn,
@@ -98,18 +103,32 @@ class _RadarScreenState extends State<RadarScreen> {
               onAction: LocationSvc.i.denied ? () => openAppSettings() : _refreshFix,
             ),
           Padding(
-            padding: const EdgeInsets.all(16),
-            child: AspectRatio(
-              aspectRatio: 1,
-              child: StreamBuilder<double?>(
-                stream: headingStream(),
-                builder: (context, hs) => CustomPaint(
-                  painter: RadarPainter(me: f, targets: targets, heading: hs.data ?? 0, c: c, reduceMotion: MediaQuery.of(context).disableAnimations),
-                  child: Semantics(label: 'Radar ${targets.length} anggota. Daftar di bawah urut jarak.'),
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+            child: SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment(value: false, label: Text('Radar'), icon: Icon(LucideIcons.radar)),
+                ButtonSegment(value: true, label: Text('Peta'), icon: Icon(LucideIcons.map)),
+              ],
+              selected: {showMap},
+              onSelectionChanged: (s) => setState(() => showMap = s.first),
+            ),
+          ),
+          if (showMap)
+            ReachMap(me: f, locs: locs)
+          else
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: AspectRatio(
+                aspectRatio: 1,
+                child: StreamBuilder<double?>(
+                  stream: headingStream(),
+                  builder: (context, hs) => CustomPaint(
+                    painter: RadarPainter(me: f, targets: targets, heading: hs.data ?? 0, c: c, reduceMotion: MediaQuery.of(context).disableAnimations),
+                    child: Semantics(label: 'Radar ${targets.length} anggota. Daftar di bawah urut jarak.'),
+                  ),
                 ),
               ),
             ),
-          ),
           SwitchListTile(
             title: const Text('Bagikan lokasi saya'),
             subtitle: const Text('Hanya ke tim konser ini, tiap 1 menit. Saat SOS tiap 10 detik.'),

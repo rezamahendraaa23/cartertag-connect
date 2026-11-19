@@ -54,6 +54,9 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
     private val rate = HashMap<String, ArrayDeque<Long>>()
     private var cfg: MeshConfig? = null
     private var notifSeq = 100
+    private lateinit var reach: ReachWatch
+    /** node hex -> member_id (dari link yang sudah bertukar hello + node), untuk HP yang terlihat di scan tapi belum tersambung. */
+    private val nodeMid = ConcurrentHashMap<String, String>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -65,6 +68,15 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
         worker = Handler(workerThread.looper)
         ble = BleMesh(this, this)
         channels()
+        reach = ReachWatch(this)
+        loadReach()
+        // status internet/layar yang dikirim Flutter sebelum service sempat hidup (startForegroundService asinkron)
+        if (System.currentTimeMillis() - MeshBus.netAt < 45_000) {
+            reach.appOnline = MeshBus.netOnline
+            reach.appOnlineAt = MeshBus.netAt
+        }
+        uiForeground = MeshBus.netFg && MeshBus.sink != null
+        worker.postDelayed(reachTask, 3_000)
         val f = android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(btReceiver, f, Context.RECEIVER_NOT_EXPORTED) else registerReceiver(btReceiver, f)
     }
@@ -115,12 +127,87 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
 
     override fun onDestroy() {
         instance = null
+        try { reach.cancel() } catch (_: Exception) {}   // jangan tinggalkan alarm "Terputus" setelah keluar konser
         try { unregisterReceiver(btReceiver) } catch (_: Exception) {}
         ble.stop()
         bridge?.stop()
         workerThread.quitSafely()
         MeshBus.emitState(false)
         super.onDestroy()
+    }
+
+    /** Tiap 3 dtk: nilai jangkauan (peringatan native) + kirim daftar HP sekitar beserta sinyalnya ke UI. */
+    private val reachTask = object : Runnable {
+        override fun run() {
+            try {
+                val now = System.currentTimeMillis()
+                val linked = if (ble.isRunning) ble.links.values.toList() else emptyList()
+                val evidence = linked.map { it.memberId to ble.freshRssi(it, now) } +
+                    // HP tim yang masih terlihat di scan (belum/sedang sambung ulang) = masih dalam jangkauan
+                    (if (ble.isRunning) ble.seenNodes.entries
+                        .filter { e -> now - e.value.at < 12_000 && linked.none { it.nodeHex == e.key || it.addr == e.value.addr } }
+                        .map { (nodeMid[it.key] ?: "") to it.value.rssiS } else emptyList())
+                val btOn = try { android.bluetooth.BluetoothAdapter.getDefaultAdapter()?.isEnabled == true } catch (_: Exception) { true }
+                // UI mati melewati 06.00: "hari konser aktif" kedaluwarsa sendiri
+                if (reach.active && activeDay != today()) reach.active = false
+                val changed = reach.tick(evidence, cfg?.names ?: emptyMap(), btOn)
+                // UI di latar: kirim hanya kalau berubah (Dart tidak perlu bangun tiap 3 dtk saat layar mati)
+                if (uiForeground) emitPeers()
+                if (changed || uiForeground) MeshBus.emitReach(reachState())
+            } catch (e: Exception) { Log.w(BleMesh.TAG, "reach: $e") }
+            worker.postDelayed(this, 3_000)
+        }
+    }
+
+    fun reachState(): Map<String, Any> = mapOf(
+        "st" to reach.state, "best" to (reach.best ?: 0.0), "mid" to reach.bestMid,
+        "weak" to reach.weakDbm, "enabled" to reach.enabled, "mute" to reach.muteUntil)
+
+    @Volatile private var uiForeground = false
+
+    /** Dari Flutter: status internet nyata (Firebase) + app sedang di layar. Dipanggil saat berubah & berkala. */
+    fun setNet(online: Boolean?, foreground: Boolean) {
+        if (online != null) {
+            reach.appOnline = online
+            reach.appOnlineAt = System.currentTimeMillis()
+        }
+        val wasFg = uiForeground
+        uiForeground = foreground
+        if (foreground && !wasFg) worker.post { emitPeers(); MeshBus.emitReach(reachState()) }
+    }
+
+    /** Dari Flutter: aktif/nonaktif peringatan + ambang RSSI melemah (kalibrasi) + diam sementara. Disimpan untuk service yang hidup sendiri. */
+    fun setReach(enabled: Boolean, weakDbm: Double, muteUntil: Long, active: Boolean) {
+        reach.enabled = enabled
+        reach.weakDbm = weakDbm.coerceIn(-100.0, -60.0)
+        reach.active = active
+        activeDay = today()
+        val wasMuted = reach.muteUntil > System.currentTimeMillis()
+        reach.muteUntil = muteUntil
+        if (!wasMuted && muteUntil > System.currentTimeMillis()) worker.post { reach.onMuted() }   // state ditulis di worker
+        getSharedPreferences("ct_reach", Context.MODE_PRIVATE).edit()
+            .putBoolean("enabled", enabled).putFloat("weak", reach.weakDbm.toFloat()).putLong("mute", muteUntil)
+            .putBoolean("active", active).putString("activeDay", today()).apply()
+        if (!enabled || muteUntil > System.currentTimeMillis()) reach.cancel()
+        worker.post { MeshBus.emitReach(reachState()) }
+    }
+
+    private fun loadReach() {
+        val p = getSharedPreferences("ct_reach", Context.MODE_PRIVATE)
+        reach.enabled = p.getBoolean("enabled", true)
+        reach.weakDbm = p.getFloat("weak", -88f).toDouble()
+        reach.muteUntil = p.getLong("mute", 0L)
+        // "aktif" hanya berlaku untuk hari (mulai 06.00) saat disimpan: service yang hidup sendiri besok tidak ikut aktif
+        activeDay = p.getString("activeDay", "") ?: ""
+        reach.active = p.getBoolean("active", false) && activeDay == today()
+    }
+
+    @Volatile private var activeDay = ""
+
+    /** Hari konser lokal (mulai 06.00), sama dengan Hub.concertDay di Dart. */
+    private fun today(): String {
+        val c = java.util.Calendar.getInstance().apply { timeInMillis = System.currentTimeMillis() - 6 * 3_600_000L }
+        return String.format(java.util.Locale.US, "%04d-%02d-%02d", c.get(java.util.Calendar.YEAR), c.get(java.util.Calendar.MONTH) + 1, c.get(java.util.Calendar.DAY_OF_MONTH))
     }
 
     private val pruneTask = object : Runnable {
@@ -151,8 +238,25 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
 
     fun drain(): List<ByteArray> = store.inboxDrain()
 
-    fun peersSnapshot(): List<Map<String, Any>> = ble.links.values.map {
-        mapOf("addr" to it.addr, "mid" to it.memberId, "rssi" to it.rssi, "via" to "ble", "connected" to true, "ls" to it.lastSeen)
+    /**
+     * HP tim yang tersambung (connected) + yang hanya terlihat di scan (connected=false, mis. batas link penuh).
+     * rs = RSSI dihaluskan & masih segar (dBm), 0 = belum ada bacaan.
+     */
+    fun peersSnapshot(): List<Map<String, Any>> {
+        val now = System.currentTimeMillis()
+        val linked = ble.links.values.map {
+            if (it.memberId.isNotEmpty() && it.nodeHex.isNotEmpty()) nodeMid[it.nodeHex] = it.memberId
+            mapOf("addr" to it.addr, "mid" to it.memberId, "rssi" to it.rssi, "rs" to (ble.freshRssi(it, now) ?: 0.0),
+                "via" to "ble", "connected" to true, "ls" to it.lastSeen, "node" to it.nodeHex, "rc" to ble.rawChangedAt(it))
+        }
+        val linkedNodes = ble.links.values.map { it.nodeHex }.toSet()
+        val linkedAddr = ble.links.keys.toSet()
+        // HP versi lama tidak mengirim node id: saring juga lewat alamat supaya tidak tampil ganda
+        val seen = ble.seenNodes.entries.filter { it.key !in linkedNodes && it.value.addr !in linkedAddr && now - it.value.at < 12_000 }.map {
+            mapOf("addr" to it.value.addr, "mid" to (nodeMid[it.key] ?: ""), "rssi" to it.value.rssiS.toInt(), "rs" to it.value.rssiS,
+                "via" to "ble", "connected" to false, "ls" to it.value.at, "node" to it.key, "rc" to it.value.rawChangedAt)
+        }
+        return linked + seen
     }
 
     fun status(): Map<String, Any> = mapOf(
@@ -212,13 +316,23 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
         worker.post {
             val c = cfg ?: return@post
             link.send(BleMesh.K_HELLO, c.mid.toByteArray(Charsets.US_ASCII))
+            link.send(BleMesh.K_NODE, Env.unhex(ble.nodeHex))
             val inv = store.inventory(c.cid, 400)
             if (inv.isNotEmpty()) link.send(BleMesh.K_INV, inv.fold(ByteArray(0)) { acc, h -> acc + Env.unhex(h) })
             emitPeers()
         }
     }
 
-    override fun onLinkDown(link: BleMesh.Link) { worker.post { emitPeers() } }
+    override fun onLinkDown(link: BleMesh.Link) {
+        worker.post {
+            // RSSI terakhir saat putus: Flutter memakainya untuk menilai "menjauh" (lemah) vs putus biasa (kuat), juga saat layar mati
+            if (link.memberId.isNotEmpty()) {
+                val rs = if (!link.rssiS.isNaN()) link.rssiS else link.rssi.toDouble()
+                MeshBus.emitLinkDown(mapOf("mid" to link.memberId, "rs" to rs, "at" to System.currentTimeMillis()))
+            }
+            emitPeers()
+        }
+    }
 
     override fun onScanSeen(addr: String, rssi: Int) {}
 
@@ -227,6 +341,7 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
             when (kind) {
                 BleMesh.K_ENV -> accept(data, link, null)
                 BleMesh.K_HELLO -> { link.memberId = String(data, Charsets.US_ASCII).trim(); emitPeers() }
+                BleMesh.K_NODE -> if (data.size >= 4) { link.nodeHex = Env.hex(data.copyOfRange(0, 4)); emitPeers() }
                 BleMesh.K_INV -> {
                     val want = ArrayList<ByteArray>()
                     var i = 0

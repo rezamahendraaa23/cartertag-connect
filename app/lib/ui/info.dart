@@ -102,6 +102,21 @@ class _AnnCard extends StatelessWidget {
                   const SizedBox(width: 6),
                   if (important) const Text('PENTING  ', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12)),
                   Expanded(child: Text('${v['byName'] ?? ''} · ${hhmm((v['at'] as num?)?.toInt() ?? 0)}', style: mono(12))),
+                  if (koord)
+                    IconButton(
+                      tooltip: 'Hapus pengumuman',
+                      visualDensity: VisualDensity.compact,
+                      icon: Icon(LucideIcons.trash2, size: 18, color: c.danger),
+                      onPressed: () async {
+                        if (await confirm(context,
+                            title: 'Hapus pengumuman?',
+                            text: 'Pengumuman hilang dari HP semua anggota. HP yang sedang terputus menyusul begitu tersambung ke tim.',
+                            action: 'Hapus',
+                            danger: true)) {
+                          await Hub.i.deleteAnnouncement('${v['id']}');
+                        }
+                      },
+                    ),
                 ]),
                 const SizedBox(height: 8),
                 Text('${v['title']}', style: Theme.of(context).textTheme.titleLarge),

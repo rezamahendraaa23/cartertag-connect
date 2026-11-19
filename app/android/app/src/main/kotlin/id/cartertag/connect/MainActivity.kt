@@ -81,6 +81,31 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                     "powerSave" -> { MeshService.instance?.setPowerSave(call.argument<Boolean>("on") == true); result.success(null) }
+                    "reach" -> {
+                        val en = call.argument<Boolean>("enabled") != false
+                        val weak = call.argument<Number>("weak")?.toDouble() ?: -88.0
+                        val mute = call.argument<Number>("mute")?.toLong() ?: 0L
+                        val active = call.argument<Boolean>("active") == true
+                        // service belum hidup: simpan dulu, dibaca saat service mulai
+                        MeshService.instance?.setReach(en, weak, mute, active) ?: run {
+                            val c = java.util.Calendar.getInstance().apply { timeInMillis = System.currentTimeMillis() - 6 * 3_600_000L }
+                            val day = String.format(java.util.Locale.US, "%04d-%02d-%02d", c.get(java.util.Calendar.YEAR), c.get(java.util.Calendar.MONTH) + 1, c.get(java.util.Calendar.DAY_OF_MONTH))
+                            getSharedPreferences("ct_reach", MODE_PRIVATE).edit()
+                                .putBoolean("enabled", en).putFloat("weak", weak.toFloat()).putLong("mute", mute)
+                                .putBoolean("active", active).putString("activeDay", day).apply()
+                        }
+                        result.success(null)
+                    }
+                    "net" -> {
+                        // online null = belum tahu (Firebase masih menyambung): hanya perbarui status layar
+                        val on: Boolean? = call.argument<Boolean>("online")
+                        val fg = call.argument<Boolean>("fg") == true
+                        MeshBus.netFg = fg
+                        if (on != null) { MeshBus.netOnline = on; MeshBus.netAt = System.currentTimeMillis() }
+                        MeshService.instance?.setNet(on, fg)
+                        result.success(null)
+                    }
+                    "peers" -> result.success(MeshService.instance?.peersSnapshot() ?: emptyList<Map<String, Any>>())
                     "drain" -> result.success(MeshService.instance?.drain() ?: emptyList<ByteArray>())
                     "status" -> result.success(MeshService.instance?.status() ?: mapOf("running" to false))
                     "bridgeStart" -> {

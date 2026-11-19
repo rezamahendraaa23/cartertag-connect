@@ -42,6 +42,8 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         const val K_INV = 2
         const val K_WANT = 3
         const val K_HELLO = 4
+        /** node id (4 byte) pengirim: memetakan RSSI dari hasil scan ke link (HP versi lama mengabaikan frame ini). */
+        const val K_NODE = 5
         const val MAX_OUT = 4
         const val MAX_LINKS = 7
     }
@@ -57,6 +59,14 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
     private var running = false
     private var powerSave = false
     val isRunning: Boolean get() = running
+    val nodeHex: String get() = Env.hex(nodeId)
+
+    /** HP konser ini yang terlihat di scan (node hex -> RSSI dihaluskan), termasuk yang belum/tidak tersambung. */
+    class Seen(@Volatile var rssiS: Double, @Volatile var at: Long, @Volatile var addr: String) {
+        @Volatile var raw = 0
+        @Volatile var rawChangedAt = at
+    }
+    val seenNodes = ConcurrentHashMap<String, Seen>()
 
     /** Link aktif (client & server), kunci = alamat perangkat. */
     val links = ConcurrentHashMap<String, Link>()
@@ -69,7 +79,21 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         var mtu = 23
         var memberId = ""
         var rssi = -80
+        /** RSSI dihaluskan (EMA): satu bacaan BLE bisa meleset ±10 dB. NaN = belum ada bacaan. */
+        @Volatile var rssiS = Double.NaN
+        @Volatile var rssiAt = 0L
+        /** Waktu terakhir bacaan MENTAH berubah. Radio yang sudah putus memberi bacaan membeku (link baru lepas ±20 dtk kemudian). */
+        @Volatile var rawChangedAt = 0L
+        @Volatile var nodeHex = ""
         var lastSeen = System.currentTimeMillis()
+
+        fun feed(r: Int) {
+            if (r >= 0 || r < -120) return
+            if (r != rssi || rawChangedAt == 0L) rawChangedAt = System.currentTimeMillis()
+            rssi = r
+            rssiS = if (rssiS.isNaN()) r.toDouble() else 0.35 * r + 0.65 * rssiS
+            rssiAt = System.currentTimeMillis()
+        }
         private var seqOut = 0
         private val queue = ConcurrentLinkedQueue<ByteArray>()
         @Volatile private var busy = false
@@ -186,6 +210,40 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         scan()
         running = true   // baru true kalau semua langkah lolos (SecurityException = izin belum ada, dicoba lagi nanti)
         main.postDelayed(maintenance, 15_000)
+        main.postDelayed(rssiTask, 3_000)
+    }
+
+    /**
+     * Baca RSSI koneksi keluar bergiliran, satu link tiap 1,5 dtk: stack Bluetooth Android hanya melayani SATU permintaan
+     * baca RSSI pada satu waktu untuk seluruh perangkat (permintaan serentak lain dibuang diam-diam).
+     * Link masuk mendapat RSSI dari scan iklan peer, dipetakan lewat node id.
+     */
+    private var rssiTurn = 0
+    private val rssiTask = object : Runnable {
+        override fun run() {
+            if (!running) return
+            val clients = links.values.filterIsInstance<ClientLink>()
+            if (clients.isNotEmpty()) {
+                val l = clients[rssiTurn++ % clients.size]
+                try { l.gatt.readRemoteRssi() } catch (_: Exception) {}
+            }
+            val now = System.currentTimeMillis()
+            seenNodes.entries.removeIf { now - it.value.at > 120_000 }
+            main.postDelayed(this, 1_500)
+        }
+    }
+
+    /** Kapan bacaan mentah terakhir berubah untuk link ini (dari link sendiri atau iklan scan-nya). */
+    fun rawChangedAt(l: Link): Long = maxOf(l.rawChangedAt, seenNodes[l.nodeHex]?.takeIf { l.nodeHex.isNotEmpty() }?.rawChangedAt ?: 0L)
+
+    /** RSSI terbaik yang masih segar untuk link: bacaan link sendiri, atau iklan peer yang terlihat di scan. */
+    fun freshRssi(l: Link, now: Long = System.currentTimeMillis()): Double? {
+        val own = if (!l.rssiS.isNaN() && now - l.rssiAt < 12_000) l.rssiS else null
+        val sc = seenNodes[l.nodeHex]?.takeIf { l.nodeHex.isNotEmpty() && now - it.at < 12_000 }?.rssiS
+        return when {
+            own != null && sc != null -> maxOf(own, sc)
+            else -> own ?: sc
+        }
     }
 
     fun stop() {
@@ -328,8 +386,16 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         if (!sd.copyOfRange(0, 8).contentEquals(cid)) return // konser lain
         val peerNode = sd.copyOfRange(8, 12)
         val addr = r.device.address
+        val now = System.currentTimeMillis()
+        val ph = Env.hex(peerNode)
+        val s = seenNodes[ph]
+        if (s == null) seenNodes[ph] = Seen(r.rssi.toDouble(), now, addr).also { it.raw = r.rssi }
+        else {
+            if (r.rssi != s.raw) { s.raw = r.rssi; s.rawChangedAt = now }
+            s.rssiS = 0.35 * r.rssi + 0.65 * s.rssiS; s.at = now; s.addr = addr
+        }
         listener.onScanSeen(addr, r.rssi)
-        links[addr]?.let { it.rssi = r.rssi; it.lastSeen = System.currentTimeMillis(); return }
+        links[addr]?.let { it.feed(r.rssi); it.lastSeen = now; return }
         // satu koneksi per pasangan: hanya node dengan id lebih kecil yang menyambung
         if (compare(nodeId, peerNode) >= 0) return
         if (connecting.containsKey(addr)) return
@@ -337,7 +403,7 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         if (links.values.count { it.outgoing } >= MAX_OUT || links.size >= MAX_LINKS) return
         connecting[addr] = System.currentTimeMillis()
         val rssi = r.rssi
-        main.post { connect(r.device, rssi) }
+        main.post { connect(r.device, rssi, ph) }
     }
 
     private fun compare(a: ByteArray, b: ByteArray): Int {
@@ -349,12 +415,13 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         return 0
     }
 
-    private fun connect(device: BluetoothDevice, rssi: Int) {
+    private fun connect(device: BluetoothDevice, rssi: Int, peerNodeHex: String) {
         val gatt = if (Build.VERSION.SDK_INT >= 23) device.connectGatt(ctx, false, clientCb, BluetoothDevice.TRANSPORT_LE)
         else device.connectGatt(ctx, false, clientCb)
         if (gatt == null) { connecting.remove(device.address); return }
         val l = ClientLink(device.address, gatt)
-        l.rssi = rssi
+        l.feed(rssi)
+        l.nodeHex = peerNodeHex
         links[device.address] = l
     }
 
@@ -417,7 +484,7 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         }
 
         override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
-            links[gatt.device.address]?.rssi = rssi
+            if (status == BluetoothGatt.GATT_SUCCESS) links[gatt.device.address]?.feed(rssi)
         }
     }
 }

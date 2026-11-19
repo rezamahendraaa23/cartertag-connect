@@ -11,6 +11,11 @@ import java.util.concurrent.ConcurrentHashMap
 object MeshBus {
     @Volatile var sink: EventChannel.EventSink? = null
     @Volatile var config: MeshConfig? = null
+
+    /** Status terakhir dari Flutter (internet nyata + app di layar), disimpan juga saat service belum hidup. */
+    @Volatile var netOnline = false
+    @Volatile var netFg = false
+    @Volatile var netAt = 0L
     private val main = Handler(Looper.getMainLooper())
 
     private fun emit(ev: Map<String, Any?>): Boolean {
@@ -22,6 +27,8 @@ object MeshBus {
     fun emitEnvelope(bytes: ByteArray, via: String): Boolean = emit(mapOf("e" to "env", "data" to bytes, "via" to via))
     fun emitPeers(list: List<Map<String, Any>>) { emit(mapOf("e" to "peers", "list" to list)) }
     fun emitState(running: Boolean) { emit(mapOf("e" to "state", "running" to running)) }
+    fun emitReach(st: Map<String, Any>) { emit(mapOf("e" to "reach") + st) }
+    fun emitLinkDown(ev: Map<String, Any>) { emit(mapOf("e" to "linkdown") + ev) }
     fun emitBridge(ev: Map<String, Any?>): Boolean = emit(ev)
 
     private const val PREF = "ct_mesh"

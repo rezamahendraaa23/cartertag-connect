@@ -79,9 +79,77 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     final ids = base.map((m) => m.id).toSet();
     return [
       for (final m in base)
-        if (m.id == c.me.id || !_left.containsKey(m.id)) m,
+        if (m.id == c.me.id || !_left.containsKey(m.id)) _withProfile(m),
       for (final e in _extraRoster.values)
         if (!ids.contains(e['mid']) && !_left.containsKey(e['mid'])) Member(e),
+    ];
+  }
+
+  /// Profil terbaru dari hello anggota (nama, nomor mobil, area) yang lebih baru dari data server, mis. driver salah isi
+  /// nomor mobil lalu menggantinya: HP lain langsung ikut tanpa menunggu refresh. Peran TIDAK ikut (tidak bisa mengaku koordinator).
+  final Map<String, Map<String, dynamic>> _prof = {};
+
+  Member _withProfile(Member m) {
+    final p = _prof[m.id];
+    if (p == null || m.id == concert?.me.id) return m;
+    return Member({...m.m, 'n': p['n'] ?? m.name, 'car': p['car'] ?? m.car, 'cars': [if ('${p['car'] ?? ''}'.isNotEmpty) p['car']], 'area': p['area'] ?? m.area});
+  }
+
+  /// Hello anggota roster server: simpan profilnya kalau berubah DAN pengirim memegang data server yang lebih baru
+  /// (st = server_time bundle pengirim, jam server). Hello basi dari HP yang belum refresh tidak menimpa perubahan admin.
+  Future<void> _applyProfile(String mid, Map<String, dynamic> p) async {
+    final c = concert;
+    final base = c?.member(mid);
+    if (c == null || base == null || mid == c.me.id) return;
+    final st = (p['st'] as num?)?.toInt() ?? 0; // hello versi lama tanpa st: diabaikan
+    final serverAt = (c.b['server_time'] as num?)?.toInt() ?? 0;
+    if (st <= serverAt || st <= ((_prof[mid]?['st'] as num?)?.toInt() ?? 0)) return;
+    final at = st;
+    final n = '${p['n'] ?? ''}', car = '${p['car'] ?? ''}', area = '${p['area'] ?? ''}';
+    if (n.isEmpty) return;
+    final same = n == base.name && car == base.car && area == base.area;
+    if (same) {
+      if (_prof.remove(mid) == null) return;
+    } else {
+      _prof[mid] = {'n': n, 'car': car, 'area': area, 'st': at};
+    }
+    await s.put('prof_${c.slug}', jsonEncode(_prof));
+    unawaited(Mesh.i.setNames(_names()));
+    notifyListeners();
+  }
+
+  /// Data server baru (refresh/join): profil yang lebih tua dari server tidak dipakai lagi.
+  void _pruneProfiles() {
+    final st = (concert?.b['server_time'] as num?)?.toInt() ?? 0;
+    _prof.removeWhere((_, v) => ((v['st'] as num?)?.toInt() ?? 0) <= st);
+  }
+
+  /// Driver salah isi nomor mobil: gabung ulang dengan kode yang sama (HP sama = anggota sama, server memperbarui mobilnya),
+  /// lalu profil baru disebar lewat hello (internet + Bluetooth). Butuh internet.
+  Future<void> changeCar(String car) async {
+    final c = concert;
+    if (c == null || !me.isDriver) return;
+    final code = await s.get<String>('code_${c.slug}');
+    if (code == null || code.isEmpty) throw ApiError('code', 'Kode konser tidak tersimpan. Keluar lalu gabung lagi pakai link / kode.');
+    final old = me.car;
+    final mine = await myCheckinsOnCar(old);
+    await join(kode: code, nama: me.name, car: car, hp: me.hp);
+    // centang penumpang yang terlanjur diisi di mobil yang salah dikosongkan (status 'batal' = belum), supaya driver & koordinator
+    // mobil itu tidak mengira penumpangnya sudah naik
+    for (final r in mine) {
+      try {
+        await sendCheckin(ManifestRow({'order_id': r['order'], 'hari': r['hari'], 'car': old}), '${r['leg']}', 'batal');
+      } catch (_) {}
+    }
+  }
+
+  /// Centang penumpang (hari konser ini) yang saya isi di mobil [car].
+  Future<List<Map<String, Object?>>> myCheckinsOnCar(String car) async {
+    final recs = await s.checkins.find(s.db,
+        finder: Finder(filter: Filter.and([Filter.equals('slug', slug), Filter.equals('car', car), Filter.equals('by', me.id)])));
+    return [
+      for (final r in recs)
+        if (isCurrent(r.value['at'] as num?) && '${r.value['st'] ?? ''}'.isNotEmpty && r.value['st'] != 'batal') r.value,
     ];
   }
 
@@ -200,6 +268,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _foreground = state == AppLifecycleState.resumed;
+    if (concert != null) _pushNet();
     if (_foreground && concert != null) {
       _drainMesh();
       LocationSvc.i.setForeground(true);
@@ -292,6 +361,8 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       final b = await Api.call('refresh', {'member_token': c.token, 'fcm_token': await Online.i.fcmToken() ?? '', 'app_version': appVersion});
       await s.concerts.record(c.slug).put(s.db, b);
       concert = Concert(b);
+      _pruneProfiles();
+      await s.put('prof_${c.slug}', _prof.isEmpty ? null : jsonEncode(_prof));
       await _applyServerMembership();
       // roster bisa bertambah (DM baru) dan kunci bisa berganti (epoch naik): bangun ulang keduanya
       await _setupKeys();
@@ -392,11 +463,12 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       await st.delete(s.db, finder: f);
     }
     await s.concerts.record(sl).delete(s.db);
-    for (final k in ['active', 'code_$sl', 'car_$sl', 'extra_$sl', 'left_$sl', 'gone_applied_$sl', 'my_sos_$sl', 'online_since_$sl']) {
+    for (final k in ['active', 'code_$sl', 'car_$sl', 'extra_$sl', 'left_$sl', 'gone_applied_$sl', 'ann_del_$sl', 'ann_del_pending_$sl', 'reach_cfg_$sl', 'reach_disband_$sl', 'prof_$sl','my_sos_$sl', 'online_since_$sl']) {
       await s.put(k, null);
     }
     _extraRoster.clear();
     _left.clear();
+    _prof.clear();
     _helloAt.clear();
     mySosId = null;
     concert = null;
@@ -476,6 +548,13 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     _helloTimer?.cancel();
     _refreshTimer?.cancel();
     _sosTimer?.cancel();
+    for (final t in _dropTimers.values) {
+      t.cancel();
+    }
+    _dropTimers.clear();
+    reachEvents.clear();
+    _reachSent.clear();
+    _myReachSt = 'idle';
     try {
       await Online.i.detach();
     } catch (_) {}
@@ -499,6 +578,16 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       ..clear()
       ..addAll(leftRaw == null ? {} : (jsonDecode(leftRaw) as Map).map((k, v) => MapEntry('$k', (v as num).toInt())));
     _helloAt.clear();
+    final prof = await s.get<String>('prof_${c.slug}');
+    _prof
+      ..clear()
+      ..addAll(prof == null ? {} : (jsonDecode(prof) as Map).map((k, v) => MapEntry('$k', (v as Map).cast<String, dynamic>())));
+    _pruneProfiles();
+    final annDel = await s.get<String>('ann_del_${c.slug}');
+    _annDel
+      ..clear()
+      ..addAll(annDel == null ? const [] : (jsonDecode(annDel) as List).map((e) => '$e'));
+    await _loadReach(c.slug);
     await _applyServerMembership();
     await _setupKeys();
     presence.clear();
@@ -522,7 +611,11 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
 
     _subs.add(Online.i.envelopes.listen((b) => receive(b, 'online')));
     _subs.add(Online.i.connection.listen((up) {
-      if (up) _flushOutbox();
+      if (up) {
+        _flushOutbox();
+        unawaited(_flushAnnDel());
+      }
+      _pushNet();
       notifyListeners();
     }));
     _subs.add(Online.i.consoleAnnouncements.listen(_onConsoleAnn));
@@ -551,6 +644,8 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       _flushOutbox();
       notifyListeners();
     }));
+    _subs.add(Mesh.i.linkDownStream.listen(_onLinkDown));
+    _subs.add(Mesh.i.reachStream.listen(_watchMyReach));
     _subs.add(Bridge.i.envelopes.listen((b) => receive(b, 'bridge')));
     _subs.add(Bridge.i.state.listen((_) {
       _flushOutbox();
@@ -561,8 +656,14 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       await Mesh.i.start(cidHex: hex(_cid), memberId: c.me.id, concertName: c.name, names: _names());
       await _drainMesh();
     }
+    _attachAt = DateTime.now().millisecondsSinceEpoch;
     unawaited(Online.i.attach(c).then((_) => notifyListeners()));
-    _tick = Timer.periodic(const Duration(seconds: 4), (_) => _flushOutbox());
+    var ticks = 0;
+    _tick = Timer.periodic(const Duration(seconds: 4), (_) {
+      _flushOutbox();
+      if (++ticks % 5 == 0) _pushNet(); // tiap 20 dtk: service menganggap status internet basi setelah 45 dtk
+    });
+    _pushNet();
     _helloTimer = Timer.periodic(const Duration(minutes: 15), (_) => _hello());
     // data tim jarang berubah & pesan realtime lewat Firebase: refresh ke GAS cukup tiap 2 jam (hemat kuota akun Google)
     _refreshTimer = Timer.periodic(const Duration(hours: 2), (_) {
@@ -770,14 +871,46 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  /// Pesan tim (bukan milik saya) yang lewat saat internet putus: disimpan di outbox bertanda relay, hanya jalur online.
+  Future<void> _queueRelay(String id, Uint8List bytes, Envelope env) async {
+    final rec = s.outbox.record(id);
+    if (await rec.exists(s.db)) return;
+    final n = await s.outbox.count(s.db, filter: Filter.and([Filter.equals('slug', slug), Filter.equals('relay', true)]));
+    if (n >= 500) return; // batas: jangan memenuhi HP penerus
+    await rec.put(s.db, {
+      'slug': slug, 'env': base64Encode(bytes), 'online': false, 'mesh': true, 'bridge': true, 'relay': true,
+      'from': env.from, 'at': env.ts, 'type': env.type,
+    });
+  }
+
   Future<void> _flushOutbox() async {
     if (_flushing || concert == null) return;
     await _ensureMesh();
     _flushing = true;
     try {
-      final recs = await s.outbox.find(s.db, finder: Finder(filter: Filter.equals('slug', slug), sortOrders: [SortOrder('at')]));
+      final all = await s.outbox.find(s.db, finder: Finder(filter: Filter.equals('slug', slug), sortOrders: [SortOrder('at')]));
+      final now = DateTime.now().millisecondsSinceEpoch;
+      // pesan & SOS saya dulu; titipan HP lain di belakang, maks 20 per putaran, berhenti di gagal pertama
+      final recs = [...all.where((r) => r.value['relay'] != true), ...all.where((r) => r.value['relay'] == true)];
+      var relays = 0;
+      var relayFailed = false;
       for (final r in recs) {
         final v = r.value;
+        if (v['relay'] == true) {
+          // titipan HP lain: cukup sampai server (push FCM diminta pengirim aslinya); basi > 6 jam dibuang
+          if (now - ((v['at'] as num?)?.toInt() ?? now) > 6 * 3600000) {
+            await s.outbox.record(r.key).delete(s.db);
+            continue;
+          }
+          if (relayFailed || !Online.i.connected || relays >= 20) continue;
+          relays++;
+          if (await Online.i.push(r.key, base64Decode(v['env'] as String), '${v['from']}')) {
+            await s.outbox.record(r.key).delete(s.db);
+          } else {
+            relayFailed = true;
+          }
+          continue;
+        }
         final bytes = base64Decode(v['env'] as String);
         var online = false, mesh = false, bridge = false;
         if (v['online'] != true && Online.i.connected) {
@@ -831,7 +964,8 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _countQueue() async {
-    queued = await s.outbox.count(s.db, filter: Filter.equals('slug', slug));
+    // titipan HP lain (relay) bukan pesan saya yang menunggu
+    queued = await s.outbox.count(s.db, filter: Filter.and([Filter.equals('slug', slug), Filter.isNull('relay')]));
     notifyListeners();
   }
 
@@ -932,6 +1066,276 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     final p = {'id': id, 'title': title, 'body': body, 'prio': important ? 1 : 0, 'at': DateTime.now().millisecondsSinceEpoch};
     await _applyAnn(p, me.id, me.name);
     await _send(EType.ann, 'g', p, prio: Prio.high);
+  }
+
+  // ----------------------------------------------------------- jangkauan tim
+
+  /// Ambang RSSI "melemah" (dBm) & radius jangkauan (m) hasil kalibrasi koordinator; default sebelum kalibrasi.
+  double reachWeak = -88, reachRadius = 30;
+  int _reachAt = 0;
+  String reachBy = '';
+  bool reachAlerts = true;
+
+  /// Peringatan didiamkan sampai (ms), mis. driver sedang menyetir. 0 = tidak.
+  int reachMuteUntil = 0;
+
+  Future<void> _loadReach(String sl) async {
+    final raw = await s.get<String>('reach_cfg_$sl');
+    final j = raw == null ? const {} : (jsonDecode(raw) as Map);
+    reachWeak = (j['weak'] as num?)?.toDouble() ?? -88;
+    reachRadius = (j['r'] as num?)?.toDouble() ?? 30;
+    _reachAt = (j['at'] as num?)?.toInt() ?? 0;
+    reachBy = '${j['by'] ?? ''}';
+    reachAlerts = (await s.get<bool>('reach_on')) ?? true;
+    reachMuteUntil = (await s.get<int>('reach_mute')) ?? 0;
+    final dis = await s.get<String>('reach_disband_$sl');
+    reachDisband = dis == null ? const {} : (jsonDecode(dis) as Map).cast<String, dynamic>();
+    await _syncReach();
+  }
+
+  /// Tanggal konser (yyyy-MM-dd; dipotong kalau server mengirim format berjam).
+  List<String> get _concertDates => [for (final e in concert?.dates ?? const <String>[]) e.length >= 10 ? e.substring(0, 10) : e];
+
+  /// Hari ini (mulai 06.00) termasuk tanggal konser? Tanpa tanggal di data konser: tidak diketahui -> false.
+  bool get concertToday => _concertDates.contains(concertDay());
+
+  /// Peringatan jangkauan hanya di hari konser. Konser tanpa tanggal: tetap boleh (alarm biasa baru bunyi setelah bertemu tim).
+  bool get reachDay => _concertDates.isEmpty || concertToday;
+
+  /// Koordinator membubarkan tim (acara selesai): {day, by, at}. Peringatan jangkauan mati sampai hari konser berikutnya.
+  Map<String, dynamic> reachDisband = const {};
+  bool get disbandedToday => reachDisband['day'] == concertDay();
+
+  String _reachSig = '';
+  Future<void> _syncReach({bool force = true}) async {
+    final enabled = reachAlerts && !disbandedToday && reachDay;
+    // alarm "internet hilang saat sendirian" hanya di tanggal konser yang pasti (bukan di rumah)
+    final active = concertToday && !disbandedToday;
+    // hari ikut di signature: Kotlin mematikan "aktif" tiap 06.00, hari ke-2 konser harus dikirim ulang
+    final sig = '$enabled|$active|$reachWeak|$reachMuteUntil|${concertDay()}';
+    if (!force && sig == _reachSig) return; // dicek ulang tiap 20 dtk (ganti hari 06.00) tanpa memanggil service terus
+    _reachSig = sig;
+    await Mesh.i.setReach(enabled: enabled, weakDbm: reachWeak, muteUntil: reachMuteUntil, active: active);
+  }
+
+  // ---- kabar "anggota lepas" ke koordinator
+
+  /// Kejadian jangkauan terbaru untuk koordinator: {mid, kind: weak|lost, by, near, at}. Hanya di memori (30 mnt terakhir).
+  final List<Map<String, dynamic>> reachEvents = [];
+  final Map<String, Timer> _dropTimers = {};
+  String _myReachSt = 'idle';
+  final Map<String, int> _reachNotified = {}; // member_id -> kapan koordinator terakhir diberi tahu
+
+  bool get _reachLive => reachAlerts && !disbandedToday && reachDay;
+
+  /// Kapan kabar jangkauan (kind|peer) terakhir dikirim HP ini / didengar dari HP lain: cegah banjir N kabar per kejadian.
+  final Map<String, int> _reachSent = {};
+
+  /// Link ke anggota putus (dari service, juga saat layar mati). Sinyal terakhirnya lemah & 30 dtk kemudian dia tidak terlihat
+  /// lagi (cek snapshot segar dari service) -> kabari koordinator. HP ini yang terakhir melihatnya.
+  void _onLinkDown(Map ev) {
+    final mid = '${ev['mid'] ?? ''}';
+    final rs = (ev['rs'] as num?)?.toDouble();
+    if (mid.isEmpty || mid == me.id || member(mid) == null) return;
+    // putus saat sinyal masih kuat: putus-sambung biasa, bukan karena menjauh
+    if (rs != null && rs != 0 && rs > reachWeak + 3) return;
+    final dropAt = (ev['at'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch;
+    _dropTimers[mid]?.cancel();
+    // 30 dtk + jeda acak 0–10 dtk: kalau HP lain lebih dulu melapor, HP ini tidak ikut mengirim
+    _dropTimers[mid] = Timer(Duration(milliseconds: 30000 + Random().nextInt(10000)), () async {
+      _dropTimers.remove(mid);
+      if (concert == null || !_reachLive || !Mesh.i.running) return;
+      // HP ini sendiri sedang menjauh dari tim: yang "lepas" justru saya, jangan laporkan yang ditinggal
+      if (_myReachSt == 'weak' || _myReachSt == 'lost') return;
+      final fresh = await Mesh.i.snapshot();
+      if (concert == null) return; // keluar konser selama menunggu
+      final back = fresh.any((p) => p.memberId == mid && (p.connected || p.lastSeen > dropAt + 3000));
+      if (back) return;
+      final p = {'op': 'reachev', 'mid': me.id, 'peer': mid, 'kind': 'lost', 'rssi': rs?.round(), 'at': DateTime.now().millisecondsSinceEpoch};
+      // hanya kalau HP ini masih bersama tim (ada HP tim lain di sekitar). Sendirian = mungkin saya yang pergi:
+      // jangan menuduh di grup; koordinator cukup mencatat untuk dirinya sendiri.
+      final withTeam = fresh.any((x) => x.memberId != mid && x.memberId.isNotEmpty && (x.connected || x.lastSeen > dropAt));
+      if (!withTeam) {
+        if (me.isKoord) _onReachEvent(p, me.id);
+        return;
+      }
+      await _sendReachEvent(p, 'lost|$mid');
+    });
+  }
+
+  /// Kirim kabar jangkauan paling banyak sekali per (jenis, anggota) per 10 mnt; koordinator pengirim langsung menerimanya sendiri.
+  Future<void> _sendReachEvent(Map<String, dynamic> p, String key) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - (_reachSent[key] ?? 0) < 10 * 60000) return;
+    _reachSent[key] = now;
+    try {
+      await _send(EType.control, 'g', p, prio: Prio.high);
+    } catch (_) {}
+    if (me.isKoord) _onReachEvent(p, me.id); // kiriman sendiri tidak kembali ke HP ini
+  }
+
+  /// Kondisi jangkauan HP ini berubah: saat mulai melemah (masih tersambung) kabari koordinator.
+  void _watchMyReach(Map r) {
+    final st = '${r['st'] ?? 'idle'}';
+    if (st == _myReachSt) return;
+    final prev = _myReachSt;
+    _myReachSt = st;
+    if (st == 'weak' && prev == 'ok' && _reachLive && !me.isKoord) {
+      unawaited(_sendReachEvent(
+          {'op': 'reachev', 'mid': me.id, 'peer': me.id, 'kind': 'weak', 'near': '${r['mid'] ?? ''}', 'at': DateTime.now().millisecondsSinceEpoch}, 'weak|${me.id}'));
+    }
+  }
+
+  /// Kabar jangkauan diterima (semua HP mencatat supaya tidak ikut melapor kejadian yang sama; hanya koordinator yang diberi tahu).
+  void _onReachEvent(Map<String, dynamic> p, String from) {
+    final peer = '${p['peer'] ?? ''}';
+    final kind = '${p['kind']}';
+    if (from != me.id) {
+      _reachSent['$kind|$peer'] = DateTime.now().millisecondsSinceEpoch;
+      if (kind == 'lost') _dropTimers.remove(peer)?.cancel();
+    }
+    final m = member(peer);
+    if (!me.isKoord || m == null || peer == me.id) return;
+    final at = _clampAt((p['at'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - at > 30 * 60000) return; // kabar basi (tertahan lama di relay)
+    reachEvents
+      ..removeWhere((e) => e['mid'] == peer || now - (e['at'] as int) > 30 * 60000)
+      ..insert(0, {'mid': peer, 'kind': kind, 'by': from, 'near': '${p['near'] ?? ''}', 'at': at});
+    notifyListeners();
+    // anggota itu sedang online lewat internet: pesannya tetap sampai, tidak perlu diganggu
+    // presence hanya bisa dipercaya kalau HP koordinator sendiri sedang tersambung ke server
+    if ((Online.i.connected && presence[peer]?.$1 == true) || !_reachLive) return;
+    if (now - (_reachNotified[peer] ?? 0) < 10 * 60000) return;
+    _reachNotified[peer] = now;
+    final who = m.displayName;
+    final seenBy = member(from)?.displayName;
+    Notifier.i.show(
+      title: kind == 'weak' ? '$who menjauh dari tim' : '$who lepas dari jangkauan tim',
+      body: kind == 'weak'
+          ? 'Sinyal Bluetooth-nya melemah. Pesan ke dia bisa segera tidak sampai.'
+          : 'Terakhir terlihat${seenBy == null || from == peer ? '' : ' dekat $seenBy'}. Pesan tidak sampai sampai dia kembali / dapat sinyal.',
+      route: 'reach',
+      important: true,
+    );
+  }
+
+  /// Koordinator: "Selesai, bubarkan tim" (undo = batalkan). Disebar ke semua HP lewat internet + mesh.
+  Future<void> disbandTeam({bool undo = false}) async {
+    if (!me.isKoord) return;
+    // selalu lebih baru dari keputusan sebelumnya (jam HP antar-koordinator bisa beda beberapa menit)
+    final at = max(DateTime.now().millisecondsSinceEpoch, ((reachDisband['at'] as num?)?.toInt() ?? 0) + 1);
+    await _applyDisband(undo ? '' : concertDay(), me.name, at);
+    try {
+      await _send(EType.control, 'g', {'op': 'disband', 'mid': me.id, 'day': undo ? '' : concertDay(), 'by': me.name, 'at': at}, prio: Prio.high);
+    } catch (_) {}
+  }
+
+  Future<void> _applyDisband(String day, String by, int at) async {
+    if (at <= ((reachDisband['at'] as num?)?.toInt() ?? 0)) return; // yang terbaru menang
+    reachDisband = {'day': day, 'by': by, 'at': at};
+    await s.put('reach_disband_$slug', jsonEncode(reachDisband));
+    await _syncReach();
+    notifyListeners();
+  }
+
+  Future<void> setReachAlerts(bool on) async {
+    reachAlerts = on;
+    await s.put('reach_on', on);
+    await _syncReach();
+    notifyListeners();
+  }
+
+  /// Diamkan peringatan jangkauan sementara (null = aktifkan lagi).
+  Future<void> muteReach(Duration? d) async {
+    reachMuteUntil = d == null ? 0 : DateTime.now().add(d).millisecondsSinceEpoch;
+    await s.put('reach_mute', reachMuteUntil);
+    await _syncReach();
+    notifyListeners();
+  }
+
+  bool get reachMuted => reachMuteUntil > DateTime.now().millisecondsSinceEpoch;
+
+  /// Kabari service: internet nyata (Firebase tersambung) + app di layar.
+  int _attachAt = 0;
+  void _pushNet() {
+    // Firebase butuh beberapa detik untuk tersambung setelah app dibuka: jangan laporkan "offline" palsu di 15 dtk pertama
+    // (service memakai status lamanya / probe sendiri)
+    final early = DateTime.now().millisecondsSinceEpoch - _attachAt < 15000;
+    unawaited(Mesh.i.setNet(online: Online.i.connected ? true : (early ? null : false), foreground: _foreground));
+    unawaited(_syncReach(force: false)); // hari konser berganti jam 06.00
+  }
+
+  Future<void> _storeReach(double weak, double r, int at, String by) async {
+    reachWeak = weak.clamp(-100, -60).toDouble();
+    reachRadius = r.clamp(5, 150).toDouble();
+    _reachAt = at;
+    reachBy = by;
+    await s.put('reach_cfg_$slug', jsonEncode({'weak': reachWeak, 'r': reachRadius, 'at': at, 'by': by}));
+    await _syncReach();
+    notifyListeners();
+  }
+
+  /// Hasil kalibrasi (koordinator): dipakai di HP ini lalu disebar ke semua HP tim (internet + mesh).
+  Future<void> applyReachCalibration({required double weakDbm, required double radiusM}) async {
+    if (!me.isKoord) return;
+    final at = DateTime.now().millisecondsSinceEpoch;
+    await _storeReach(weakDbm, radiusM, at, me.name);
+    try {
+      await _send(EType.control, 'g', {'op': 'reach', 'mid': me.id, 'weak': reachWeak, 'r': reachRadius, 'at': at, 'by': me.name}, prio: Prio.high);
+    } catch (_) {}
+  }
+
+  /// Pengumuman yang sudah dihapus (id). Disimpan supaya kiriman ulang lewat mesh / riwayat online tidak memunculkannya lagi.
+  final Set<String> _annDel = {};
+
+  /// Hapus pengumuman (koordinator). Disebar sebagai control (tanpa push & notifikasi) lewat internet + mesh.
+  Future<void> deleteAnnouncement(String id) async {
+    if (!me.isKoord) return;
+    final cur = await s.anns.record(id).get(s.db);
+    await _removeAnn(id);
+    // pengumuman Console: tandai juga di server supaya Console & HP yang gabung belakangan tidak menampilkannya lagi
+    if (cur?['by'] == 'console' && concert!.token.isNotEmpty) {
+      // offline (paling sering di lapangan): antrekan, dikirim begitu ada internet (_flushAnnDel)
+      final pend = {...((jsonDecode((await s.get<String>('ann_del_pending_$slug')) ?? '[]') as List).map((e) => '$e')), id};
+      await s.put('ann_del_pending_$slug', jsonEncode(pend.toList()));
+      unawaited(_flushAnnDel());
+    }
+    try {
+      await _send(EType.control, 'g', {'op': 'anndel', 'mid': me.id, 'id': id, 'at': DateTime.now().millisecondsSinceEpoch}, prio: Prio.high);
+    } catch (_) {}
+  }
+
+  bool _flushingAnnDel = false;
+  Future<void> _flushAnnDel() async {
+    final c = concert;
+    if (c == null || c.token.isEmpty || _flushingAnnDel) return;
+    final key = 'ann_del_pending_${c.slug}';
+    final raw = await s.get<String>(key);
+    if (raw == null) return;
+    _flushingAnnDel = true;
+    try {
+      final keep = <String>[];
+      for (final id in (jsonDecode(raw) as List).map((e) => '$e')) {
+        try {
+          await Api.call('ann_del', {'member_token': c.token, 'id': id}, timeout: const Duration(seconds: 10));
+        } on ApiError catch (e) {
+          if (e.isNetwork) keep.add(id); // error lain (bukan koordinator lagi, id tidak ada): buang
+        } catch (_) {
+          keep.add(id);
+        }
+      }
+      await s.put(key, keep.isEmpty ? null : jsonEncode(keep));
+    } finally {
+      _flushingAnnDel = false;
+    }
+  }
+
+  Future<void> _removeAnn(String id) async {
+    if (id.isEmpty) return;
+    if (_annDel.add(id)) await s.put('ann_del_$slug', jsonEncode(_annDel.toList()));
+    await s.anns.record(id).delete(s.db);
+    notifyListeners();
   }
 
   Future<String> startRollcall() async {
@@ -1036,7 +1440,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     final c = concert;
     if (c == null || _groupKey == null || _leaving) return;
     try {
-      await _send(EType.control, 'g', {
+      final helloId = await _send(EType.control, 'g', {
         'op': 'hello',
         'mid': me.id,
         'n': me.name,
@@ -1046,8 +1450,12 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
         'px': keys.pubXb64,
         'pe': keys.pubEdB64,
         'at': DateTime.now().millisecondsSinceEpoch,
+        // umur data server profil ini (jam server): penerima hanya memakai profil yang lebih baru dari data servernya sendiri
+        'st': (c.b['server_time'] as num?)?.toInt() ?? 0,
       }, ttl: 3);
-      await s.outbox.delete(s.db, finder: Finder(filter: Filter.equals('type', EType.control)));
+      // hello cukup sekali jalan (dikirim ulang tiap 15 mnt). Hanya envelope hello ini yang dibuang: control lain yang
+      // masih menunggu (hapus pengumuman, kalibrasi, bye) dan titipan HP lain tetap di outbox sampai terkirim.
+      await s.outbox.record(helloId).delete(s.db);
     } catch (_) {}
   }
 
@@ -1107,8 +1515,13 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     _markSeen(id);
 
     // Gateway: pesan dari mesh/jembatan diteruskan ke server; pesan dari server diteruskan ke mesh/jembatan.
-    if (via != 'online' && Online.i.connected && env.type != EType.loc) {
-      unawaited(Online.i.push(id, bytes, env.from));
+    if (via != 'online' && env.type != EType.loc) {
+      if (Online.i.connected) {
+        unawaited(Online.i.push(id, bytes, env.from));
+      } else if (Online.i.ready) {
+        // internet HP ini sedang putus: simpan, teruskan begitu tersambung (pesan sudah ditandai terlihat, tidak akan datang lagi)
+        unawaited(_queueRelay(id, bytes, env));
+      }
     }
     if (via == 'online') {
       if (Mesh.i.running) unawaited(Mesh.i.send(bytes));
@@ -1158,9 +1571,11 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
           await s.reports.record('${p['eid']}').put(s.db, {'slug': slug, 'kind': 'fleet', 'event_id': p['eid'], ...p, 'at_iso': DateTime.fromMillisecondsSinceEpoch((p['at'] as num?)?.toInt() ?? env.ts).toIso8601String()});
         }
       case EType.ann:
-        await _applyAnn(p, env.from, fromName);
-        _queueAckGroupItem(p['id'] as String?, 'd');
-        Notifier.i.show(title: 'Pengumuman: ${p['title']}', body: '${p['body'] ?? ''}', route: 'info', important: true);
+        // sudah ada / sudah dihapus: tidak dinotifikasi ulang
+        if (await _applyAnn(p, env.from, fromName)) {
+          _queueAckGroupItem(p['id'] as String?, 'd');
+          Notifier.i.show(title: 'Pengumuman: ${p['title']}', body: '${p['body'] ?? ''}', route: 'info', important: true);
+        }
       case EType.rollcall:
         await _applyRollcall(p, env.from);
         if (p['op'] == 'start') {
@@ -1265,6 +1680,34 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     final mid = '${p['mid']}';
     if (mid != from) return;
     final at = _clampAt((p['at'] as num?)?.toInt() ?? 0);
+    if (p['op'] == 'reach') {
+      // kalibrasi jangkauan dari koordinator; yang terbaru menang
+      if (!verified || !(_memberAny(from)?.isKoord ?? false) || at <= _reachAt) return;
+      final w = (p['weak'] as num?)?.toDouble(), r = (p['r'] as num?)?.toDouble();
+      if (w == null || r == null) return;
+      await _storeReach(w, r, at, '${p['by'] ?? ''}');
+      return;
+    }
+    if (p['op'] == 'reachev') {
+      if (verified) _onReachEvent(p, from);
+      return;
+    }
+    if (p['op'] == 'disband') {
+      // koordinator membubarkan / membatalkan bubar tim
+      if (!verified || !(_memberAny(from)?.isKoord ?? false)) return;
+      await _applyDisband('${p['day'] ?? ''}', '${p['by'] ?? ''}', at);
+      return;
+    }
+    if (p['op'] == 'anndel') {
+      // koordinator (tanda tangan terverifikasi), atau HP mana pun yang meneruskan penghapusan dari Console untuk pengumuman Console
+      final id = '${p['id'] ?? ''}';
+      final cur = await s.anns.record(id).get(s.db);
+      final byKoord = verified && (_memberAny(from)?.isKoord ?? false);
+      // penerus hapus-dari-Console harus anggota terverifikasi (tanda tangan sah), dan hanya untuk pengumuman Console
+      final consoleRelay = verified && p['via'] == 'console' && (cur == null || cur['by'] == 'console');
+      if (byKoord || consoleRelay) await _removeAnn(id);
+      return;
+    }
     if (p['op'] == 'bye') {
       // hanya dari anggota yang tanda tangannya terverifikasi
       if (!verified) return;
@@ -1280,7 +1723,10 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       if (at <= leftAt) return; // hello lama (tersimpan di relay / riwayat) dari sebelum dia keluar
       await _unmarkLeft(mid);
     }
-    if (concert!.member(mid) != null) return;
+    if (concert!.member(mid) != null) {
+      if (verified) await _applyProfile(mid, p);
+      return;
+    }
     _extraRoster[mid] = {'mid': mid, 'n': p['n'], 'r': p['r'], 'car': p['car'] ?? '', 'area': p['area'] ?? '', 'px': p['px'], 'pe': p['pe'], 'st': 'aktif', 'mesh': true};
     await s.put('extra_$slug', jsonEncode(_extraRoster));
     _chByHash[hex(await channelHash(slug, dmChannel(me.id, mid)))] = dmChannel(me.id, mid);
@@ -1289,7 +1735,18 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
 
   void _onConsoleAnn(Map<String, dynamic> a) async {
     final id = '${a['id']}';
-    if (await s.anns.record(id).exists(s.db)) return;
+    if (a['del'] != null) {
+      // dihapus dari Console: hapus lokal + teruskan ke HP offline lewat mesh
+      final known = _annDel.contains(id);
+      await _removeAnn(id);
+      if (!known) {
+        try {
+          await _send(EType.control, 'g', {'op': 'anndel', 'mid': me.id, 'id': id, 'via': 'console', 'at': a['del']}, prio: Prio.high, meshOnly: true);
+        } catch (_) {}
+      }
+      return;
+    }
+    if (_annDel.contains(id) || await s.anns.record(id).exists(s.db)) return;
     await _applyAnn({'id': id, 'title': a['title'], 'body': a['body'], 'prio': a['prio'], 'at': a['at']}, 'console', '${a['by'] ?? 'Console'}');
     Notifier.i.show(title: 'Pengumuman: ${a['title']}', body: '${a['body'] ?? ''}', route: 'info', important: true);
     // teruskan ke mesh supaya anggota offline ikut menerima (ditandatangani ulang oleh HP ini)
@@ -1302,10 +1759,12 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
 
   // ----------------------------------------------------------- terapkan state
 
-  Future<void> _applyAnn(Map<String, dynamic> p, String from, String fromName) async {
+  /// true = pengumuman baru tersimpan (false: sudah ada atau sudah dihapus).
+  Future<bool> _applyAnn(Map<String, dynamic> p, String from, String fromName) async {
     final id = '${p['id']}';
+    if (_annDel.contains(id)) return false;
     final cur = await s.anns.record(id).get(s.db);
-    if (cur != null) return;
+    if (cur != null) return false;
     await s.anns.record(id).put(s.db, {
       'slug': slug,
       'id': id,
@@ -1316,6 +1775,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       'byName': p['via'] == 'console' ? (p['by'] ?? 'Console') : fromName,
       'at': p['at'] ?? DateTime.now().millisecondsSinceEpoch,
     });
+    return true;
   }
 
   Future<void> _applyRollcall(Map<String, dynamic> p, String from) async {

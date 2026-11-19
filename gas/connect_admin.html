@@ -210,9 +210,11 @@ function tlDrawAnn(b) {
     if (TL.data.firebase) {
         api('adminConnectMonitor', TL.slug).then(function (r) {
             if (!r.success) throw new Error(r.message);
-            var list = Object.keys(r.data.ann || {}).map(function (k) { return r.data.ann[k]; }).sort(function (a, b) { return b.at - a.at; });
+            var list = Object.keys(r.data.ann || {}).map(function (k) { return r.data.ann[k]; }).filter(function (a) { return !a.del; })
+                .sort(function (a, b) { return b.at - a.at; });
             $('tlAnnList').className = 'card'; $('tlAnnList').innerHTML = list.length ? list.map(function (a) {
-                return '<div style="margin-bottom:12px"><b>' + esc(a.title) + '</b> ' + (a.prio ? '<span class="tl-st warn">Penting</span>' : '') + '<br>' + esc(a.body || '') + '<br><span class="hint">' + esc(a.by) + ' · ' + tlAgo(a.at) + '</span></div>';
+                return '<div style="margin-bottom:12px"><b>' + esc(a.title) + '</b> ' + (a.prio ? '<span class="tl-st warn">Penting</span>' : '') + '<br>' + esc(a.body || '') + '<br><span class="hint">' + esc(a.by) + ' · ' + tlAgo(a.at) + '</span>' +
+                    (edit ? ' <button class="btn ghost sm" onclick="tlAnnDelete(\'' + esc(a.id) + '\', this)">Hapus</button>' : '') + '</div>';
             }).join('') : '<span class="hint">Belum ada pengumuman dari Console.</span>';
         }).catch(function () { });
     }
@@ -222,6 +224,16 @@ function tlAnnounce() {
     api('adminConnectAnnounce', TL.slug, { title: $('tlAt').value, body: $('tlAb').value, prio: $('tlAp').checked ? 'penting' : '' })
         .then(function (r) { if (!r.success) throw new Error(r.message); toast('Terkirim · push ke ' + r.sent + ' HP'); tlDraw(); })
         .catch(function (e) { btn.disabled = false; toast(e.message, 4000); });
+}
+
+function tlAnnDelete(id, btn) {
+    askConfirm({ title: 'Hapus pengumuman ini?', text: 'Pengumuman hilang dari HP semua anggota (HP offline menyusul begitu tersambung ke tim).', ok: 'Hapus', danger: true }).then(function (ok) {
+        if (!ok) return;
+        btn.disabled = true;
+        api('adminConnectAnnDelete', TL.slug, id)
+            .then(function (r) { if (!r.success) throw new Error(r.message); toast('Pengumuman dihapus'); tlDraw(); })
+            .catch(function (e) { btn.disabled = false; toast(e.message, 4000); });
+    });
 }
 
 /* ---- C05 Manifest (upload CSV/XLSX) */

@@ -91,6 +91,8 @@ class _HomeShellState extends State<HomeShell> {
       setState(() => tab = 1);
     } else if (r == 'info') {
       setState(() => tab = 3);
+    } else if (r == 'reach') {
+      setState(() => tab = 2); // notifikasi jangkauan -> tab Lokasi (Jangkauan Tim)
     } else if (r.startsWith('sos')) {
       final id = r.contains(':') ? r.split(':')[1] : null;
       Navigator.of(context).push(MaterialPageRoute(fullscreenDialog: true, builder: (_) => id == null ? const SosListScreen() : IncomingSosScreen(sosId: id)));
@@ -141,7 +143,12 @@ class _HomeShellState extends State<HomeShell> {
                 ),
               ]),
             ),
-            actions: const [SosButton(), SizedBox(width: 12)],
+            actions: [
+              // keluar langsung dari layar utama (tidak perlu masuk ke Saya); tetap minta konfirmasi
+              IconButton(tooltip: 'Keluar dari konser', icon: const Icon(LucideIcons.logOut), onPressed: () => leaveConcertFlow(context)),
+              const SosButton(),
+              const SizedBox(width: 12),
+            ],
           ),
           body: Column(children: [
             if (h.mySosId != null) const ActiveSosBanner(),
