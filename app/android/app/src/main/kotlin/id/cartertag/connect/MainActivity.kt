@@ -96,6 +96,8 @@ class MainActivity : FlutterActivity() {
                     "bridgeKick" -> { MeshService.instance?.bridgeKick(call.argument<String>("client")!!); result.success(null) }
                     "batteryExempt" -> { requestBatteryExemption(); result.success(null) }
                     "brand" -> result.success(Build.MANUFACTURER.lowercase())
+                    "linkStatus" -> result.success(joinLinkEnabled())
+                    "linkSettings" -> { openLinkSettings(); result.success(null) }
                     "autostart" -> result.success(openAutostartSettings())
                     else -> result.notImplemented()
                 }
@@ -141,6 +143,35 @@ class MainActivity : FlutterActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         routeOf(intent)?.let { routeChannel?.invokeMethod("open", it) }
+    }
+
+    /**
+     * Link gabung (https://cartertag-connect.web.app/join?...) sudah boleh membuka app langsung?
+     * Android 12+: domain harus "verified" (otomatis lewat assetlinks) atau "selected" (dipilih pengguna di pengaturan).
+     * Android 11 ke bawah: selalu true (Android menawarkan pilihan aplikasi saat link diklik).
+     */
+    private fun joinLinkEnabled(): Boolean {
+        if (Build.VERSION.SDK_INT < 31) return true
+        return try {
+            val dvm = getSystemService(android.content.pm.verify.domain.DomainVerificationManager::class.java)
+            val st = dvm.getDomainVerificationUserState(packageName) ?: return false
+            if (!st.isLinkHandlingAllowed) return false
+            val s = st.hostToStateMap["cartertag-connect.web.app"]
+            s == android.content.pm.verify.domain.DomainVerificationUserState.DOMAIN_STATE_VERIFIED ||
+                s == android.content.pm.verify.domain.DomainVerificationUserState.DOMAIN_STATE_SELECTED
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    /** Buka layar "Buka secara default" app ini supaya pengguna bisa mencentang cartertag-connect.web.app. */
+    private fun openLinkSettings() {
+        val i = if (Build.VERSION.SDK_INT >= 31)
+            Intent(Settings.ACTION_APP_OPEN_BY_DEFAULT_SETTINGS, Uri.parse("package:$packageName"))
+        else Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+        try { startActivity(i) } catch (_: Exception) {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        }
     }
 
     /**

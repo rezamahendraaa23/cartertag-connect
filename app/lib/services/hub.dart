@@ -28,6 +28,9 @@ import 'updater.dart';
 /// Jalur koneksi untuk pil status (PRD UI/UX K01).
 enum Link { online, mesh, bridge, isolated }
 
+/// Status seorang anggota (titik status di daftar anggota & header chat).
+enum MemberStatus { online, near, offline }
+
 /// Pusat app: sesi konser, kirim/terima envelope lewat semua jalur, outbox, gateway, dan state UI.
 class Hub extends ChangeNotifier with WidgetsBindingObserver {
   Hub._();
@@ -39,6 +42,9 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
   SecretKey? _groupKey;
   final Map<String, String> _chByHash = {};
   final Map<String, Map<String, dynamic>> _extraRoster = {};
+
+  /// member_id -> (online?, terakhir terlihat ms), realtime dari Firebase (tanpa panggilan GAS).
+  final Map<String, (bool, int)> presence = {};
   final _subs = <StreamSubscription>[];
   Timer? _tick, _helloTimer, _refreshTimer, _sosTimer;
   bool netUp = false;
@@ -84,6 +90,18 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
 
   int get meshPeers => Mesh.i.peers.where((p) => p.connected).length;
   List<Peer> get meshPeersList => Mesh.i.peers;
+
+  /// Status anggota untuk ditampilkan: online / dekat (Bluetooth) / terakhir online.
+  MemberStatus statusOf(String mid) {
+    final near = Mesh.i.peers.any((p) => p.connected && p.memberId == mid);
+    final pr = presence[mid];
+    if (pr != null && pr.$1) return MemberStatus.online;
+    if (near) return MemberStatus.near;
+    return MemberStatus.offline;
+  }
+
+  /// Waktu terakhir online (ms), 0 kalau belum pernah terlihat.
+  int lastSeenOf(String mid) => presence[mid]?.$2 ?? 0;
 
   /// Paksa coba kirim ulang antrean sekarang (tombol "Coba kirim sekarang").
   Future<void> retryNow() async {
@@ -354,6 +372,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       ..clear()
       ..addAll(extra == null ? {} : (jsonDecode(extra) as Map).map((k, v) => MapEntry('$k', (v as Map).cast<String, dynamic>())));
     await _setupKeys();
+    presence.clear();
     unawaited(_writeMyIds());
     fleetCache.clear();
     for (final r in await s.fleet.find(s.db, finder: Finder(filter: Filter.equals('slug', c.slug)))) {
@@ -378,6 +397,11 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       notifyListeners();
     }));
     _subs.add(Online.i.consoleAnnouncements.listen(_onConsoleAnn));
+    _subs.add(Online.i.presence.listen((e) {
+      final old = presence[e.key];
+      presence[e.key] = e.value;
+      if (old?.$1 != e.value.$1) notifyListeners();
+    }));
     _subs.add(Online.i.locations.listen((e) {
       if (e.key != me.id) _applyLoc(e.value, e.key);
     }));

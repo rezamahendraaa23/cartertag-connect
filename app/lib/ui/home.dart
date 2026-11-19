@@ -6,6 +6,7 @@ import 'package:sembast/sembast.dart';
 
 import '../core/theme.dart';
 import '../services/hub.dart';
+import '../services/mesh.dart';
 import '../services/updater.dart';
 import 'chat.dart';
 import 'fleet.dart';
@@ -27,6 +28,13 @@ class _HomeShellState extends State<HomeShell> {
   StreamSubscription? _sosSub;
   final _shownSos = <String>{};
   bool bannerCollapsed = false;
+  bool linkOff = false; // link gabung belum boleh membuka app (pengaturan "Buka secara default")
+  late final AppLifecycleListener _life = AppLifecycleListener(onResume: _checkLink);
+
+  Future<void> _checkLink() async {
+    final ok = await Mesh.i.linkEnabled();
+    if (mounted && linkOff == ok) setState(() => linkOff = !ok);
+  }
   String? updateHidden;
 
   @override
@@ -35,12 +43,15 @@ class _HomeShellState extends State<HomeShell> {
     Hub.i.pendingRoute.addListener(_route);
     WidgetsBinding.instance.addPostFrameCallback((_) => _route());
     _sosSub = Hub.i.watch(Hub.i.s.sos).listen(_onSos);
+    _life; // aktifkan pendengar: cek ulang saat kembali dari pengaturan
+    _checkLink();
   }
 
   @override
   void dispose() {
     Hub.i.pendingRoute.removeListener(_route);
     _sosSub?.cancel();
+    _life.dispose();
     super.dispose();
   }
 
@@ -127,6 +138,14 @@ class _HomeShellState extends State<HomeShell> {
             if (!concert.verified)
               const InfoBanner(tone: Tone.warn, text: 'Bergabung lewat QR. Akun diverifikasi otomatis saat ada internet.'),
             if (h.lastError != null) InfoBanner(tone: Tone.danger, text: h.lastError!, action: 'Tutup', onAction: () => setState(() => h.lastError = null)),
+            if (linkOff)
+              InfoBanner(
+                tone: Tone.info,
+                icon: LucideIcons.link,
+                text: 'Supaya link gabung dari WhatsApp langsung membuka app, aktifkan "Buka link yang didukung" lalu centang cartertag-connect.web.app.',
+                action: 'Aktifkan',
+                onAction: () => Mesh.i.openLinkSettings(),
+              ),
             ListenableBuilder(
               listenable: Updater.i,
               builder: (context, _) {

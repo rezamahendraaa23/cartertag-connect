@@ -202,6 +202,20 @@ class MembersScreen extends StatefulWidget {
 
 class _MembersScreenState extends State<MembersScreen> {
   String q = '';
+
+  void _changed() => mounted ? setState(() {}) : null;
+
+  @override
+  void initState() {
+    super.initState();
+    Hub.i.addListener(_changed); // titik status online/offline berubah realtime
+  }
+
+  @override
+  void dispose() {
+    Hub.i.removeListener(_changed);
+    super.dispose();
+  }
   @override
   Widget build(BuildContext context) {
     final h = Hub.i;
@@ -213,7 +227,6 @@ class _MembersScreenState extends State<MembersScreen> {
         if (a.isDriver) return (int.tryParse(a.car) ?? 9999).compareTo(int.tryParse(b.car) ?? 9999);
         return a.name.compareTo(b.name);
       });
-    final near = {for (final p in h.meshPeersList) p.memberId};
     return Scaffold(
       appBar: AppBar(title: Text(widget.search ? 'Cari' : 'Anggota (${h.roster.length})')),
       body: Column(children: [
@@ -238,11 +251,11 @@ class _MembersScreenState extends State<MembersScreen> {
               final canDm = m.pubX.isNotEmpty;
               return ListTile(
                 minTileHeight: 64,
-                leading: Avatar(name: m.name),
+                leading: StatusAvatar(member: m),
                 title: Text(m.isDriver && m.car.isNotEmpty ? '${m.carLabel} · ${m.name}' : m.name, style: Theme.of(context).textTheme.titleMedium),
-                subtitle: Text([m.roleLabel, if (m.area.isNotEmpty) 'Area ${m.area}', if (!m.joined) 'belum gabung'].join(' · ')),
+                subtitle: Text([m.roleLabel, if (m.area.isNotEmpty) 'Area ${m.area}', statusText(m)].join(' · '),
+                    style: TextStyle(color: Hub.i.statusOf(m.id) == MemberStatus.online ? c.ok : null)),
                 trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                  if (near.contains(m.id)) StatusChip(label: 'Dekat', icon: LucideIcons.network, fg: c.accent, bg: c.accentBg, dense: true),
                   if (m.hp.isNotEmpty)
                     IconButton(
                       tooltip: 'Telepon ${m.name}',
@@ -484,8 +497,12 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       backgroundColor: c.chatBg,
       appBar: AppBar(
         titleSpacing: 0,
-        title: Row(children: [
-          info.isDm
+        title: ListenableBuilder(
+          listenable: Hub.i,
+          builder: (context, _) => Row(children: [
+          info.isDm && info.peer != null
+              ? StatusAvatar(member: info.peer!, size: 38)
+              : info.isDm
               ? Avatar(name: info.title, size: 38)
               : Container(
                   width: 38,
@@ -497,11 +514,12 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(info.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.titleMedium),
-              Text(info.isDm ? info.subtitle : '${Hub.i.roster.length} anggota',
+              Text(info.isDm ? (info.peer != null ? statusText(info.peer!) : info.subtitle) : '${Hub.i.roster.length} anggota',
                   maxLines: 1, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodySmall),
             ]),
           ),
         ]),
+        ),
         actions: [
           if (!kIsWeb)
             IconButton(

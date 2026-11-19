@@ -127,6 +127,24 @@ class Mesh {
 
   Future<void> bridgeKick(String client) => _m.invokeMethod('bridgeKick', {'client': client});
 
+  /// Link gabung sudah boleh membuka app langsung (Android 12+: domain terverifikasi / dipilih pengguna)?
+  Future<bool> linkEnabled() async {
+    if (!supported) return true;
+    try {
+      return (await _m.invokeMethod<bool>('linkStatus')) ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// Buka pengaturan "Buka secara default" app ini.
+  Future<void> openLinkSettings() async {
+    if (!supported) return;
+    try {
+      await _m.invokeMethod('linkSettings');
+    } catch (_) {}
+  }
+
   /// Merek HP (huruf kecil), mis. "xiaomi", "oppo".
   Future<String> brand() async {
     if (!supported) return '';

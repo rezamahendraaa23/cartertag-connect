@@ -239,6 +239,40 @@ class SectionLabel extends StatelessWidget {
       );
 }
 
+/// Titik status di sudut avatar: hijau = online, biru = dekat (Bluetooth), tanpa titik = offline.
+class StatusAvatar extends StatelessWidget {
+  const StatusAvatar({super.key, required this.member, this.size = 44});
+  final Member member;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = CT.of(context);
+    final st = Hub.i.statusOf(member.id);
+    final dot = switch (st) { MemberStatus.online => c.ok, MemberStatus.near => c.accent, MemberStatus.offline => null };
+    return Stack(clipBehavior: Clip.none, children: [
+      Avatar(name: member.name, size: size),
+      if (dot != null)
+        Positioned(
+          right: -1,
+          bottom: -1,
+          child: Container(
+            width: size * 0.3,
+            height: size * 0.3,
+            decoration: BoxDecoration(color: dot, shape: BoxShape.circle, border: Border.all(color: c.bg, width: 2)),
+          ),
+        ),
+    ]);
+  }
+}
+
+/// "online" / "dekat (Bluetooth)" / "terakhir online 12 mnt lalu" / "belum online".
+String statusText(Member m) => switch (Hub.i.statusOf(m.id)) {
+      MemberStatus.online => 'online',
+      MemberStatus.near => 'dekat (Bluetooth)',
+      MemberStatus.offline => Hub.i.lastSeenOf(m.id) > 0 ? 'terakhir online ${timeAgo(Hub.i.lastSeenOf(m.id))}' : 'belum online',
+    };
+
 String timeAgo(int ms) {
   if (ms <= 0) return 'belum ada';
   final d = DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(ms));

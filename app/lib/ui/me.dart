@@ -92,6 +92,14 @@ class _MeScreenState extends State<MeScreen> {
         ),
         ListTile(
           minTileHeight: 56,
+          leading: const Icon(LucideIcons.link),
+          title: const Text('Buka link gabung di app'),
+          subtitle: const Text('Aktifkan "Buka link yang didukung" → centang cartertag-connect.web.app'),
+          trailing: const Icon(LucideIcons.chevronRight),
+          onTap: () => Mesh.i.openLinkSettings(),
+        ),
+        ListTile(
+          minTileHeight: 56,
           leading: const Icon(LucideIcons.rocket),
           title: const Text('Tetap aktif di latar'),
           subtitle: const Text('Autostart & baterai (penting untuk Xiaomi, Oppo, Vivo, Realme)'),

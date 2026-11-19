@@ -25,6 +25,10 @@ class Online {
   final _envCtl = StreamController<Uint8List>.broadcast();
   final _annCtl = StreamController<Map<String, dynamic>>.broadcast();
   final _locCtl = StreamController<MapEntry<String, Map<String, dynamic>>>.broadcast();
+  final _presCtl = StreamController<MapEntry<String, (bool, int)>>.broadcast();
+
+  /// Status online anggota dari presence: member_id -> (online?, terakhir terlihat ms).
+  Stream<MapEntry<String, (bool, int)>> get presence => _presCtl.stream;
   final _subs = <StreamSubscription>[];
 
   Stream<bool> get connection => _connCtl.stream;
@@ -94,6 +98,7 @@ class Online {
       }, onError: (_) {}));
       void loc(DatabaseEvent e) {
         final v = e.snapshot.value;
+        if (v is Map) _presCtl.add(MapEntry('${e.snapshot.key}', (v['on'] == true, (v['ls'] as num?)?.toInt() ?? 0)));
         if (v is Map && v['lat'] is num && v['lng'] is num) {
           _locCtl.add(MapEntry('${e.snapshot.key}', {'lat': v['lat'], 'lng': v['lng'], 'acc': v['acc'], 'bat': v['bat'], 'at': v['at']}));
         }
