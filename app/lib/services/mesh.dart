@@ -82,12 +82,15 @@ class Mesh {
   }
 
   /// Siarkan envelope ke semua peer (router Kotlin menangani dedup, relay, simpan-teruskan).
-  Future<void> send(Uint8List envelope) async {
-    if (!supported || !running) return;
+  /// Serahkan envelope ke service mesh. true = diterima service (disimpan & disiarkan; HP yang muncul belakangan
+  /// tetap menerimanya lewat sinkron inventaris). false = service belum jalan -> outbox mencoba lagi nanti.
+  Future<bool> send(Uint8List envelope) async {
+    if (!supported || !running) return false;
     try {
       await _m.invokeMethod('send', {'data': envelope});
+      return true;
     } on PlatformException {
-      // service mati: outbox akan mencoba lagi
+      return false;
     }
   }
 
@@ -135,6 +138,23 @@ class Mesh {
     } catch (_) {
       return true;
     }
+  }
+
+  /// Bluetooth HP sedang nyala?
+  Future<bool> bluetoothOn() async {
+    if (!supported) return true;
+    try {
+      return (await _m.invokeMethod<bool>('btOn')) ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  Future<void> openBluetoothSettings() async {
+    if (!supported) return;
+    try {
+      await _m.invokeMethod('btSettings');
+    } catch (_) {}
   }
 
   /// Buka pengaturan "Buka secara default" app ini.

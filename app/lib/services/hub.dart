@@ -496,7 +496,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     _markSeen(id);
     final bytes = env.encode();
     if (meshOnly) {
-      if (Mesh.i.running) await Mesh.i.send(bytes);
+      await Mesh.i.send(bytes);
       return id;
     }
     // lokasi tidak masuk outbox (basi kalau terlambat)
@@ -526,10 +526,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       online = await Online.i.push(id, bytes, me.id);
       if (online && meta != null) _notifyServer(meta);
     }
-    if (Mesh.i.running) {
-      await Mesh.i.send(bytes);
-      mesh = true;
-    }
+    mesh = await Mesh.i.send(bytes);
     if (Bridge.i.approved) {
       Bridge.i.send(bytes);
       bridge = true;
@@ -569,8 +566,24 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   bool _flushing = false;
+  int _meshRetryAt = 0;
+
+  /// Service mesh belum jalan (mis. izin Bluetooth baru diberikan, atau service dimatikan sistem): coba lagi tiap 30 detik.
+  Future<void> _ensureMesh() async {
+    final c = concert;
+    if (c == null || !Mesh.i.supported || Mesh.i.running) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now < _meshRetryAt) return;
+    _meshRetryAt = now + 30000;
+    if (await Mesh.i.start(cidHex: hex(_cid), memberId: c.me.id, concertName: c.name, names: _names())) {
+      await _drainMesh();
+      notifyListeners();
+    }
+  }
+
   Future<void> _flushOutbox() async {
     if (_flushing || concert == null) return;
+    await _ensureMesh();
     _flushing = true;
     try {
       final recs = await s.outbox.find(s.db, finder: Finder(filter: Filter.equals('slug', slug), sortOrders: [SortOrder('at')]));
@@ -582,10 +595,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
           online = await Online.i.push(r.key, bytes, me.id);
           if (online) _notifyServer({...v, 'id': r.key});
         }
-        if (v['mesh'] != true && Mesh.i.running) {
-          await Mesh.i.send(bytes);
-          mesh = true;
-        }
+        if (v['mesh'] != true) mesh = await Mesh.i.send(bytes);
         if (v['bridge'] != true && Bridge.i.approved) {
           Bridge.i.send(bytes);
           bridge = true;

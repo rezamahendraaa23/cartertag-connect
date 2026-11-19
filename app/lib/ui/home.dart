@@ -7,6 +7,7 @@ import 'package:sembast/sembast.dart';
 import '../core/theme.dart';
 import '../services/hub.dart';
 import '../services/mesh.dart';
+import 'package:geolocator/geolocator.dart';
 import '../services/updater.dart';
 import 'chat.dart';
 import 'fleet.dart';
@@ -31,9 +32,18 @@ class _HomeShellState extends State<HomeShell> {
   bool linkOff = false; // link gabung belum boleh membuka app (pengaturan "Buka secara default")
   late final AppLifecycleListener _life = AppLifecycleListener(onResume: _checkLink);
 
+  bool btOff = false, locOff = false; // tanpa keduanya HP tim tidak bisa saling menemukan lewat Bluetooth
+
   Future<void> _checkLink() async {
     final ok = await Mesh.i.linkEnabled();
-    if (mounted && linkOff == ok) setState(() => linkOff = !ok);
+    final bt = await Mesh.i.bluetoothOn();
+    final loc = !Mesh.i.supported || await Geolocator.isLocationServiceEnabled();
+    if (!mounted) return;
+    setState(() {
+      linkOff = !ok;
+      btOff = !bt;
+      locOff = !loc;
+    });
   }
   String? updateHidden;
 
@@ -138,6 +148,16 @@ class _HomeShellState extends State<HomeShell> {
             if (!concert.verified)
               const InfoBanner(tone: Tone.warn, text: 'Bergabung lewat QR. Akun diverifikasi otomatis saat ada internet.'),
             if (h.lastError != null) InfoBanner(tone: Tone.danger, text: h.lastError!, action: 'Tutup', onAction: () => setState(() => h.lastError = null)),
+            if (btOff || locOff)
+              InfoBanner(
+                tone: Tone.warn,
+                icon: LucideIcons.bluetooth,
+                text: btOff && locOff
+                    ? 'Nyalakan Bluetooth & Lokasi supaya pesan tetap jalan tanpa sinyal.'
+                    : (btOff ? 'Nyalakan Bluetooth supaya pesan tetap jalan tanpa sinyal.' : 'Nyalakan Lokasi (GPS) supaya HP tim bisa saling menemukan lewat Bluetooth.'),
+                action: 'Nyalakan',
+                onAction: () => btOff ? Mesh.i.openBluetoothSettings() : Geolocator.openLocationSettings(),
+              ),
             if (linkOff)
               InfoBanner(
                 tone: Tone.info,

@@ -97,6 +97,9 @@ class MainActivity : FlutterActivity() {
                     "batteryExempt" -> { requestBatteryExemption(); result.success(null) }
                     "brand" -> result.success(Build.MANUFACTURER.lowercase())
                     "linkStatus" -> result.success(joinLinkEnabled())
+                    "btOn" -> result.success(
+                        (getSystemService(android.bluetooth.BluetoothManager::class.java)?.adapter?.isEnabled) == true)
+                    "btSettings" -> { startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)); result.success(null) }
                     "linkSettings" -> { openLinkSettings(); result.success(null) }
                     "autostart" -> result.success(openAutostartSettings())
                     else -> result.notImplemented()

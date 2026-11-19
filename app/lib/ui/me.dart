@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
@@ -292,7 +293,14 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
             _kv('Server realtime', Online.i.ready ? (Online.i.connected ? 'Tersambung' : 'Terputus') : 'Belum diatur (hanya mesh)'),
             _kv('Gateway', Online.i.connected && h.meshPeers > 0 ? 'Aktif: pesan mesh diteruskan ke internet' : 'Tidak aktif'),
             const SectionLabel('Mesh (Bluetooth)'),
-            _kv('Service', Mesh.i.supported ? (Mesh.i.running ? 'Berjalan' : 'Mati') : 'Tidak tersedia di perangkat ini'),
+            _kv('Service', Mesh.i.supported ? (Mesh.i.running ? 'Berjalan' : 'Mati (izin Bluetooth belum diberikan?)') : 'Tidak tersedia di perangkat ini'),
+            FutureBuilder<List<bool>>(
+              future: Future.wait([Mesh.i.bluetoothOn(), Geolocator.isLocationServiceEnabled()]),
+              builder: (context, s) => Column(children: [
+                _kv('Bluetooth', s.data == null ? '…' : (s.data![0] ? 'Nyala' : 'MATI — nyalakan')),
+                _kv('Lokasi (GPS)', s.data == null ? '…' : (s.data![1] ? 'Nyala' : 'MATI — wajib nyala untuk menemukan HP tim')),
+              ]),
+            ),
             _kv('Link aktif', '${status['links'] ?? peers.length}'),
             if (status['bridgeClients'] != null && status['bridgeClients'] != 0) _kv('Klien jembatan', '${status['bridgeClients']}'),
             for (final p in peers)
