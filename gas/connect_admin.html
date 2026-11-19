@@ -1,0 +1,294 @@
+<!-- connect_admin.html — Menu "Tim Lapangan" (CarterTag Connect) di CarterTag Console.
+     Di-include dari admin.html: <?!= include_('connect_admin') ?>  (setelah include receipt_lib).
+     Memakai helper admin.html: api, esc, toast, askConfirm, openModal, closeModal, pageHead, kpi, konserAktif, isAktif, findKonser, canEdit, copyText. -->
+<style>
+  .tl-code { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 18px; }
+  .tl-code b { font: 700 40px/1 var(--mono); letter-spacing: .06em; }
+  .tl-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; }
+  .tl-sub { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .tl-sub button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent, #fff); }
+  .tl-tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .tl-tbl th { position: sticky; top: 0; background: var(--card); text-align: left; font-weight: 700; padding: 8px 10px; border-bottom: 2px solid var(--ink, var(--line)); }
+  .tl-tbl td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  .tl-tbl tr.err td { background: var(--danger-bg); }
+  .tl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+  .tl-car { padding: 12px 14px; }
+  .tl-car .no { font: 700 24px/1 var(--mono); margin-right: 8px; }
+  .tl-sos { background: var(--danger-bg); }
+  .tl-st { display: inline-flex; gap: 6px; align-items: center; padding: 2px 10px; border-radius: 999px; border: 2px solid var(--ink, var(--line)); font-weight: 700; font-size: 12px; }
+  .tl-st.ok { background: var(--ok-bg); color: var(--ok); } .tl-st.warn { background: var(--amber-bg); color: var(--amber); }
+  .tl-st.bad { background: var(--danger-bg); color: var(--danger); } .tl-st.info { background: var(--info-bg); color: var(--info); }
+  .tl-drop { border: 2px dashed var(--ink, var(--line)); border-radius: var(--r-lg); padding: 22px; text-align: center; }
+  .tl-drop.on { background: var(--accent-bg); }
+  .tl-qr { width: 220px; height: 220px; background: #fff; border: 2px solid #000; padding: 8px; }
+</style>
+<script>
+/* ------------------------------------------------------- Tim Lapangan (CarterTag Connect) */
+var TL = { slug: '', tab: 'pengaturan', data: null, mon: null, monTimer: null, upRows: null, seq: 0 };
+var TL_STATUS = { siap: 'Siap', menuju: 'Menuju', di_titik: 'Di titik', berangkat: 'Berangkat', tiba: 'Tiba', selesai: 'Selesai', kendala: 'Kendala' };
+
+function paneTimLapangan() {
+    if (!SYS.READY) return needSystem();
+    loadKonser().then(function () {
+        if (view.name !== 'timlapangan') return;
+        if (!isAktif(TL.slug)) TL.slug = view.slug && isAktif(view.slug) ? view.slug : '';
+        $('pane').innerHTML = pageHead('Tim Lapangan', 'CarterTag Connect: chat driver &amp; panitia di hari konser, jalan dengan atau tanpa internet.') +
+            '<div class="dash-tools"><select id="tlKonser" aria-label="Konser" onchange="tlPick(this.value)"><option value="">— Pilih konser —</option>' +
+            konserAktif().map(function (k) { return '<option value="' + esc(k.slug) + '"' + (k.slug === TL.slug ? ' selected' : '') + '>' + esc(k.name) + '</option>'; }).join('') + '</select>' +
+            '<button class="btn ghost sm" onclick="tlSettingsModal()">Pengaturan Firebase &amp; App</button></div>' +
+            '<div class="tl-sub" role="tablist">' + [['pengaturan', 'Pengaturan'], ['anggota', 'Anggota'], ['monitor', 'Monitor'], ['pengumuman', 'Pengumuman'], ['manifest', 'Manifest'], ['distribusi', 'Distribusi App']].map(function (t) {
+                return '<button class="btn ghost sm" role="tab" aria-pressed="' + (TL.tab === t[0]) + '" onclick="tlTab(\'' + t[0] + '\')">' + t[1] + '</button>';
+            }).join('') + '</div><div id="tlBody"></div>';
+        if (TL.slug) tlLoad(); else tlDraw();
+    }).catch(showErr('pane'));
+}
+function tlPick(slug) { TL.slug = slug; TL.data = null; TL.mon = null; if (slug) tlLoad(); else tlDraw(); }
+function tlTab(t) { TL.tab = t; clearInterval(TL.monTimer); paneTimLapangan(); }
+function tlLoad() {
+    var seq = ++TL.seq;
+    $('tlBody').innerHTML = '<div class="dlg-loading" style="min-height:24vh"><span class="spin"></span><span>Memuat…</span></div>';
+    api('adminConnectGet', TL.slug).then(function (r) {
+        if (seq !== TL.seq) return;
+        if (!r.success) throw new Error(r.message);
+        TL.data = r.data; tlDraw();
+    }).catch(showErr('tlBody'));
+}
+function tlDraw() {
+    var b = $('tlBody'); if (!b) return;
+    clearInterval(TL.monTimer);
+    if (!TL.slug) { b.innerHTML = '<div class="card" style="color:var(--muted)">Pilih konser di atas.</div>'; return; }
+    if (!TL.data) return;
+    var fn = { pengaturan: tlDrawSettings, anggota: tlDrawMembers, monitor: tlDrawMonitor, pengumuman: tlDrawAnn, manifest: tlDrawManifest, distribusi: tlDrawDist }[TL.tab] || tlDrawSettings;
+    fn(b);
+}
+function tlSave(input) {
+    return api('adminConnectSave', TL.slug, input).then(function (r) { if (!r.success) throw new Error(r.message); TL.data = r.data; tlDraw(); toast('Tersimpan ✓'); })
+        .catch(function (e) { toast(e.message, 4000); });
+}
+function tlFbWarn() {
+    return TL.data.firebase ? '' : '<div class="msg err">Firebase belum diatur: app hanya jalan lewat mesh (tanpa jalur online, tanpa push). Klik <b>Pengaturan Firebase &amp; App</b>.</div>';
+}
+
+/* ---- C01 Pengaturan: cukup bagikan 2 kode */
+function tlCodeCard(label, code, sub) {
+    return '<div class="card"><div class="eyebrow">' + label + '</div><div class="tl-code"><b>CT-' + esc(code) + '</b>' +
+        '<button class="btn ghost sm" onclick="copyText(\'CT-' + esc(code) + '\')">Salin</button>' +
+        '<button class="btn ghost sm" onclick="tlQrModal(\'' + label + '\', \'CT-' + esc(code) + '\')">QR</button></div>' +
+        '<p class="hint" style="margin:8px 0 0">' + sub + '</p></div>';
+}
+function tlDrawSettings(b) {
+    var d = TL.data, c = d.cfg, edit = canEdit('timlapangan');
+    if (!c.enabled) {
+        b.innerHTML = '<div class="card"><h2 style="margin:0 0 8px">Connect dimatikan untuk konser ini</h2>' +
+            (edit ? '<button class="btn" onclick="tlSave({enabled:true})">Nyalakan lagi</button>' : '') + '</div>';
+        return;
+    }
+    b.innerHTML = tlFbWarn() +
+        '<div class="kpis">' + kpi('Sudah gabung', d.counts.total, '') + kpi('Driver', d.counts.driver || 0, '') +
+        kpi('Koordinator', d.counts.koordinator || 0, '') + kpi('Epoch kunci', c.epoch, 'naik saat reset') + '</div>' +
+        tlCodeCard('Kode Driver', d.codes.driver, 'Driver buka app, isi <b>nama + kode ini + nomor mobil</b>, langsung masuk.') +
+        tlCodeCard('Kode Koordinator', d.codes.koordinator, 'Untuk koordinator/panitia: bisa kirim pengumuman & mulai absen. Jangan dibagikan ke driver.') +
+        '<div class="card"><label class="tl-row"><input type="checkbox" ' + (c.manifest.enabled ? 'checked' : '') + (edit ? '' : ' disabled') + ' onchange="tlSave({manifest:{enabled:this.checked}})"> ' +
+        '<span><b>Tampilkan manifest penumpang di app</b><br><span class="hint">Driver melihat penumpang sesuai nomor mobil yang dia isi (dari Plotingan Mobil).</span></span></label></div>' +
+        (edit ? '<div class="tl-row"><button class="btn danger sm" onclick="tlResetCode()">Reset kedua kode</button>' +
+            '<button class="btn ghost sm" onclick="tlSave({enabled:false})">Matikan Connect untuk konser ini</button></div>' : '');
+}
+function tlResetCode() {
+    askConfirm({ title: 'Reset kode?', text: 'Kode driver & koordinator diganti. Yang sudah gabung tetap masuk dan dapat kunci baru saat online; kode lama tidak bisa dipakai gabung lagi.', ok: 'Reset kode', danger: true })
+        .then(function (ok) { if (!ok) return; api('adminConnectCode', TL.slug, true).then(function (r) { if (!r.success) throw new Error(r.message); TL.data = r.data; tlDraw(); toast('Kode baru dibuat'); }).catch(function (e) { toast(e.message, 4000); }); });
+}
+
+/* ---- C02 Anggota */
+function tlDrawMembers(b) {
+    var d = TL.data, edit = canEdit('timlapangan');
+    var rows = d.members.slice().sort(function (a, b) { return (a.role + a.nama).localeCompare(b.role + b.nama); });
+    b.innerHTML = '<div class="tl-row" style="margin-bottom:12px;justify-content:space-between"><input type="search" id="tlQ" placeholder="Cari nama / HP / mobil" oninput="tlFilterMembers()" style="max-width:320px">' +
+        '</div>' +
+        '<div class="card tbl-wrap"><table class="tl-tbl"><thead><tr><th>Nama</th><th>Role</th><th>Mobil</th><th>Status</th><th>Terakhir terlihat</th><th></th></tr></thead><tbody id="tlMembers">' +
+        rows.map(function (m) {
+            var st = m.status === 'aktif' ? '<span class="tl-st ok">Aktif · ' + esc(m.platform || '-') + '</span>' : (m.status === 'dikeluarkan' ? '<span class="tl-st bad">Dikeluarkan</span>' : '<span class="tl-st warn">Belum gabung</span>');
+            var acts = !edit ? '' : '<select aria-label="Ubah role" onchange="tlMember(\'' + esc(m.member_id) + '\',{role:this.value})">' + ['driver', 'panitia', 'koordinator'].map(function (r) { return '<option value="' + r + '"' + (m.role === r ? ' selected' : '') + '>' + r + '</option>'; }).join('') + '</select> ' +
+                (m.status === 'dikeluarkan' ? '<button class="btn ghost sm" onclick="tlMember(\'' + esc(m.member_id) + '\',{status:\'aktif\'})">Pulihkan</button>' : '<button class="btn ghost sm" onclick="tlKick(\'' + esc(m.member_id) + '\',\'' + esc(m.nama) + '\')">Keluarkan</button>');
+            return '<tr data-q="' + esc((m.nama + ' ' + m.hp + ' ' + m.mobil).toLowerCase()) + '"><td><b>' + esc(m.nama) + '</b><br><span class="hint">' + esc(m.hp) + '</span></td><td>' + esc(m.role) + '</td><td>' + esc(m.mobil || '-') + (m.area ? '<br><span class="hint">' + esc(m.area) + '</span>' : '') + '</td><td>' + st + '</td><td>' + esc(m.last_seen || '-') + '</td><td>' + acts + '</td></tr>';
+        }).join('') + '</tbody></table></div>' +
+        '<p class="hint">Anggota muncul otomatis setelah gabung pakai kode. Tidak perlu didaftarkan.</p>';
+}
+function tlFilterMembers() {
+    var q = ($('tlQ').value || '').toLowerCase();
+    document.querySelectorAll('#tlMembers tr').forEach(function (tr) { tr.style.display = !q || tr.getAttribute('data-q').indexOf(q) !== -1 ? '' : 'none'; });
+}
+function tlMember(mid, patch) {
+    api('adminConnectMemberUpdate', TL.slug, mid, patch).then(function (r) { if (!r.success) throw new Error(r.message); TL.data = r.data; tlDraw(); toast('Tersimpan ✓'); }).catch(function (e) { toast(e.message, 4000); });
+}
+function tlKick(mid, nama) {
+    askConfirm({ title: 'Keluarkan ' + nama + '?', text: 'Dia tidak bisa refresh data lagi. Supaya tidak bisa membaca pesan baru, reset kode konser setelah ini.', ok: 'Keluarkan', danger: true })
+        .then(function (ok) { if (ok) tlMember(mid, { status: 'dikeluarkan' }); });
+}
+/* ---- C03 Monitor */
+function tlDrawMonitor(b) {
+    b.innerHTML = tlFbWarn() + '<div id="tlMon"><div class="dlg-loading" style="min-height:20vh"><span class="spin"></span><span>Memuat monitor…</span></div></div>';
+    if (!TL.data.firebase) return;
+    var load = function () {
+        if (view.name !== 'timlapangan' || TL.tab !== 'monitor') return clearInterval(TL.monTimer);
+        QUIET++;
+        var p = api('adminConnectMonitor', TL.slug);
+        QUIET--;
+        p.then(function (r) { if (!r.success) throw new Error(r.message); TL.mon = r.data; tlMonDraw(); }).catch(showErr('tlMon'));
+    };
+    load(); TL.monTimer = setInterval(load, 10000);
+}
+function tlMonDraw() {
+    var m = TL.mon, box = $('tlMon'); if (!box || !m) return;
+    var names = {}; (m.members || []).forEach(function (x) { names[x.mid] = x; });
+    var cars = {}; (m.members || []).forEach(function (x) { if (x.r === 'driver') (x.cars && x.cars.length ? x.cars : [x.car]).forEach(function (c) { if (c) cars[c] = x; }); });
+    var fleet = m.fleet || {}, now = Date.now();
+    var sos = Object.keys(m.sos || {}).map(function (k) { return Object.assign({ id: k }, m.sos[k]); }).filter(function (s) { return s.active; });
+    var legOf = new Date().getHours() < 15 ? 'pergi' : 'pulang';
+    var count = { jalan: 0, tiba: 0, kendala: 0, sepi: 0 };
+    var cards = Object.keys(cars).sort(function (a, b) { return (parseInt(a, 10) || 999) - (parseInt(b, 10) || 999); }).map(function (no) {
+        var f = fleet[no + '_' + legOf] || null, d = cars[no], p = (m.presence || {})[d.mid] || {};
+        var stale = f && ['menuju', 'di_titik', 'berangkat'].indexOf(f.st) !== -1 && now - f.at > 15 * 60000;
+        var cls = !f ? '' : (f.st === 'kendala' ? 'bad' : (stale ? 'warn' : (f.st === 'tiba' || f.st === 'selesai' ? 'ok' : 'info')));
+        if (f && f.st === 'kendala') count.kendala++; else if (stale) count.sepi++; else if (f && (f.st === 'tiba' || f.st === 'selesai')) count.tiba++; else if (f) count.jalan++;
+        return '<div class="card tl-car"><div class="tl-row"><span class="no">' + esc(no) + '</span><div style="flex:1;min-width:0"><b>' + esc(d.n) + '</b><br><span class="hint">' + esc([d.plat, d.area].filter(Boolean).join(' · ')) + '</span></div></div>' +
+            '<div class="tl-row" style="margin-top:8px"><span class="tl-st ' + cls + '">' + (stale ? 'Tidak ada kabar' : (f ? esc(TL_STATUS[f.st] || f.st) : 'Belum lapor')) + '</span>' +
+            '<span class="hint">' + (f ? tlAgo(f.at) : '') + (p.bat ? ' · baterai ' + p.bat + '%' : '') + (p.on ? ' · online' : '') + '</span></div>' +
+            (f && f.note ? '<div class="hint" style="margin-top:6px">' + esc(f.note) + '</div>' : '') + '</div>';
+    });
+    box.innerHTML = (sos.length ? '<div class="card tl-sos"><h3 style="margin:0 0 8px">SOS aktif (' + sos.length + ')</h3>' + sos.map(function (s) {
+        return '<div class="tl-row" style="margin-bottom:6px"><b>' + esc(s.name || (names[s.by] || {}).n || s.by) + '</b><span class="tl-st bad">' + esc((s.kind || 'darurat').toUpperCase()) + '</span>' +
+            '<span class="hint">' + tlAgo(s.at) + (s.bat ? ' · baterai ' + s.bat + '%' : '') + '</span>' +
+            (s.lat ? '<a href="https://www.google.com/maps/search/?api=1&query=' + s.lat + ',' + s.lng + '" target="_blank" rel="noopener">Lihat di peta &rarr;</a>' : '') + '</div>';
+    }).join('') + '</div>' : '') +
+        '<div class="kpis">' + kpi('Mobil', Object.keys(cars).length, 'leg ' + legOf) + kpi('Di jalan', count.jalan, '') + kpi('Tiba', count.tiba, '', count.tiba ? 'ok' : '') +
+        kpi('Kendala / tanpa kabar', count.kendala + ' / ' + count.sepi, '', count.kendala ? 'warn' : '') + '</div>' +
+        '<div class="tl-grid">' + (cards.join('') || '<div class="card hint">Belum ada mobil di Plotingan.</div>') + '</div>' +
+        '<p class="hint">Diperbarui ' + new Date(m.at).toLocaleTimeString('id-ID') + ' · otomatis tiap 10 detik. Status dari HP yang offline muncul setelah ada HP tim yang online (gateway).</p>';
+}
+function tlAgo(ms) { var s = Math.round((Date.now() - ms) / 1000); return s < 60 ? 'baru saja' : (s < 3600 ? Math.round(s / 60) + ' mnt lalu' : Math.round(s / 3600) + ' jam lalu'); }
+
+/* ---- C04 Pengumuman */
+function tlDrawAnn(b) {
+    var edit = canEdit('timlapangan');
+    b.innerHTML = tlFbWarn() + (edit && TL.data.firebase ? '<div class="card"><div class="field"><label for="tlAt">Judul</label><input id="tlAt" type="text" maxlength="80" placeholder="mis. Titik jemput pindah ke Gate 5"></div>' +
+        '<div class="field"><label for="tlAb">Isi (opsional)</label><textarea id="tlAb" rows="4" maxlength="1000"></textarea></div>' +
+        '<label class="tl-row" style="margin-bottom:12px"><input type="checkbox" id="tlAp" checked> Tandai penting</label>' +
+        '<button class="btn" id="tlAnnBtn" onclick="tlAnnounce()">Kirim ke semua anggota</button>' +
+        '<p class="hint" style="margin:10px 0 0">Masuk lewat internet ke HP yang online; HP yang online meneruskannya ke anggota offline lewat mesh.</p></div>' : '') +
+        '<div id="tlAnnList" class="card hint">Riwayat pengumuman tampil di tab Monitor (data online).</div>';
+    if (TL.data.firebase) {
+        api('adminConnectMonitor', TL.slug).then(function (r) {
+            if (!r.success) throw new Error(r.message);
+            var list = Object.keys(r.data.ann || {}).map(function (k) { return r.data.ann[k]; }).sort(function (a, b) { return b.at - a.at; });
+            $('tlAnnList').className = 'card'; $('tlAnnList').innerHTML = list.length ? list.map(function (a) {
+                return '<div style="margin-bottom:12px"><b>' + esc(a.title) + '</b> ' + (a.prio ? '<span class="tl-st warn">Penting</span>' : '') + '<br>' + esc(a.body || '') + '<br><span class="hint">' + esc(a.by) + ' · ' + tlAgo(a.at) + '</span></div>';
+            }).join('') : '<span class="hint">Belum ada pengumuman dari Console.</span>';
+        }).catch(function () { });
+    }
+}
+function tlAnnounce() {
+    var btn = $('tlAnnBtn'); btn.disabled = true;
+    api('adminConnectAnnounce', TL.slug, { title: $('tlAt').value, body: $('tlAb').value, prio: $('tlAp').checked ? 'penting' : '' })
+        .then(function (r) { if (!r.success) throw new Error(r.message); toast('Terkirim · push ke ' + r.sent + ' HP'); tlDraw(); })
+        .catch(function (e) { btn.disabled = false; toast(e.message, 4000); });
+}
+
+/* ---- C05 Manifest (upload CSV/XLSX) */
+var TL_COLS = ['nomor_mobil', 'nama', 'pax', 'no_wa', 'area', 'titik_kumpul', 'jam_jemput', 'trip', 'hari', 'order_id'];
+function tlDrawManifest(b) {
+    var c = TL.data.cfg, edit = canEdit('timlapangan');
+    b.innerHTML = '<div class="card"><b>Sumber aktif: ' + (c.manifest.enabled ? (c.manifest.source === 'upload' ? 'Upload tim' : 'Plotingan Mobil') : 'Manifest nonaktif') + '</b>' +
+        '<p class="hint" style="margin:6px 0 0">Ganti sumber di tab Pengaturan. Upload hanya dipakai kalau sumber = Upload tim.</p></div>' +
+        (edit ? '<div class="card"><div class="tl-drop" id="tlDrop" ondragover="event.preventDefault();this.classList.add(\'on\')" ondragleave="this.classList.remove(\'on\')" ondrop="tlDropFile(event)">' +
+            '<p style="margin:0 0 10px"><b>Tarik file CSV ke sini</b> atau</p><input type="file" id="tlFile" accept=".csv,text/csv" onchange="tlReadFile(this.files[0])">' +
+            '<p class="hint" style="margin:10px 0 0">Kolom: ' + TL_COLS.join(', ') + '. Dari Excel: Simpan Sebagai → CSV.</p>' +
+            '<button class="btn ghost sm" style="margin-top:10px" onclick="tlTemplate()">Unduh template CSV</button></div><div id="tlPrev"></div></div>' : '');
+}
+function tlTemplate() {
+    var csv = TL_COLS.join(',') + '\n3,Dina Putri,2,081234567890,Bekasi,Stasiun Bekasi pintu utara,13.00,PP,,BT-012\n';
+    var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = 'template-manifest-connect.csv'; a.click();
+}
+function tlDropFile(e) { e.preventDefault(); $('tlDrop').classList.remove('on'); if (e.dataTransfer.files[0]) tlReadFile(e.dataTransfer.files[0]); }
+function tlParseCsv(text) {
+    var rows = [], row = [], cell = '', q = false, sep = text.indexOf(';') !== -1 && text.split('\n')[0].indexOf(',') === -1 ? ';' : ',';
+    for (var i = 0; i < text.length; i++) {
+        var ch = text[i];
+        if (q) { if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch; }
+        else if (ch === '"') q = true;
+        else if (ch === sep) { row.push(cell); cell = ''; }
+        else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+        else cell += ch;
+    }
+    if (cell || row.length) { row.push(cell); rows.push(row); }
+    return rows.filter(function (r) { return r.some(function (c) { return String(c).trim(); }); });
+}
+function tlReadFile(f) {
+    if (!f) return;
+    var rd = new FileReader();
+    rd.onload = function () {
+        var rows = tlParseCsv(String(rd.result).replace(/^﻿/, ''));
+        if (rows.length < 2) return setMsg($('tlPrev'), 'File kosong atau tanpa baris data.');
+        var head = rows[0].map(function (h) { return String(h).trim().toLowerCase().replace(/\s+/g, '_'); });
+        TL.upRows = rows.slice(1).map(function (r) { var o = {}; head.forEach(function (h, i) { o[h] = String(r[i] || '').trim(); }); return o; });
+        api('adminConnectManifestUpload', TL.slug, TL.upRows, true).then(function (res) { if (!res.success) throw new Error(res.message); tlPreview(res); }).catch(function (e) { setMsg($('tlPrev'), e.message); });
+    };
+    rd.readAsText(f);
+}
+function tlPreview(res) {
+    var bad = {}; res.errors.forEach(function (e) { (bad[e.row] = bad[e.row] || []).push(e.kolom + ': ' + e.pesan); });
+    $('tlPrev').innerHTML = '<div class="msg ' + (res.valid ? 'ok' : 'err') + '">' + res.count + ' baris · ' + (res.valid ? 'semua valid' : res.errors.length + ' masalah, perbaiki file lalu upload ulang') + '</div>' +
+        '<div class="tbl-wrap" style="max-height:360px;overflow:auto"><table class="tl-tbl"><thead><tr><th>#</th>' + TL_COLS.map(function (c) { return '<th>' + c + '</th>'; }).join('') + '<th>Masalah</th></tr></thead><tbody>' +
+        TL.upRows.slice(0, 300).map(function (r, i) { var n = i + 2; return '<tr' + (bad[n] ? ' class="err"' : '') + '><td>' + n + '</td>' + TL_COLS.map(function (c) { return '<td>' + esc(r[c] || '') + '</td>'; }).join('') + '<td>' + esc((bad[n] || []).join('; ')) + '</td></tr>'; }).join('') +
+        '</tbody></table></div>' + (res.valid ? '<button class="btn" style="margin-top:12px" id="tlUpBtn" onclick="tlUploadSave()">Simpan manifest (' + res.count + ' baris)</button>' : '');
+}
+function tlUploadSave() {
+    $('tlUpBtn').disabled = true;
+    api('adminConnectManifestUpload', TL.slug, TL.upRows, false).then(function (r) { if (!r.success || !r.valid) throw new Error(r.message || 'Data tidak valid'); toast('Manifest tersimpan · ' + r.count + ' baris'); TL.upRows = null; tlDraw(); })
+        .catch(function (e) { $('tlUpBtn').disabled = false; toast(e.message, 4000); });
+}
+
+/* ---- C06 Distribusi App */
+function tlDrawDist(b) {
+    var a = TL.data.app || {};
+    b.innerHTML = '<div class="card"><h3 style="margin:0 0 8px">Android (APK)</h3>' + (a.apk_url ? '<div class="tl-row"><a href="' + esc(a.apk_url) + '" target="_blank" rel="noopener">' + esc(a.apk_url) + '</a>' +
+        '<button class="btn ghost sm" onclick="copyText(\'' + esc(a.apk_url) + '\')">Salin</button><button class="btn ghost sm" onclick="tlQrModal(\'Unduh APK\', \'' + esc(a.apk_url) + '\')">QR</button></div>' +
+        '<p class="hint">Versi terbaru: ' + esc(a.version || '-') + '. Driver perlu mengizinkan "Install dari sumber tidak dikenal".</p>' : '<p class="hint">Link APK belum diisi (Pengaturan Firebase &amp; App).</p>') + '</div>' +
+        '<div class="card"><h3 style="margin:0 0 8px">iPhone / laptop (web app)</h3>' + (a.pwa_url ? '<div class="tl-row"><a href="' + esc(a.pwa_url) + '" target="_blank" rel="noopener">' + esc(a.pwa_url) + '</a>' +
+        '<button class="btn ghost sm" onclick="copyText(\'' + esc(a.pwa_url) + '\')">Salin</button><button class="btn ghost sm" onclick="tlQrModal(\'Web app\', \'' + esc(a.pwa_url) + '\')">QR</button></div>' +
+        '<p class="hint">Di iPhone: buka di Safari → Bagikan → Tambah ke Layar Utama (supaya notifikasi bisa masuk). Tanpa internet, iPhone ikut lewat Mode Jembatan di HP Android tim.</p>' : '<p class="hint">Link web app belum diisi.</p>') + '</div>';
+}
+/** QR dibuat di browser (pustaka qrcode-generator yang sudah dimuat admin.html), tidak dikirim ke layanan luar. */
+function tlQrModal(title, text) {
+    var img = '';
+    try { var qr = qrcode(0, 'M'); qr.addData(text); qr.make(); img = qr.createDataURL(6, 2); } catch (e) { img = ''; }
+    openModal(title, '<div style="display:flex;flex-direction:column;align-items:center;gap:10px">' +
+        (img ? '<img class="tl-qr" alt="QR ' + esc(title) + '" src="' + img + '">' : '<div class="msg err">Pustaka QR belum termuat. Muat ulang halaman.</div>') +
+        '<code>' + esc(text) + '</code></div>', '<button class="btn" onclick="closeModal()">Tutup</button>');
+}
+
+/* ---- Pengaturan global Firebase & App */
+function tlSettingsModal() {
+    api('adminConnectSettingsGet').then(function (r) {
+        if (!r.success) throw new Error(r.message);
+        var d = r.data, sup = ME && ME.superadmin;
+        openModal('Pengaturan Firebase & App',
+            '<p class="hint" style="margin-top:0">Endpoint app (isi di layar Gabung kalau belum tertanam di APK):</p><div class="tl-row"><code style="word-break:break-all">' + esc(d.exec_url) + '</code><button class="btn ghost sm" onclick="copyText(\'' + esc(d.exec_url) + '\')">Salin</button></div>' +
+            '<div class="field" style="margin-top:14px"><label>Service account Firebase</label><div class="hint">' + (d.firebase_email ? 'Terpasang: ' + esc(d.firebase_email) + ' (' + esc(d.firebase_project) + ')' : 'Belum diisi') + '</div>' +
+            (sup ? '<textarea id="tlSa" rows="3" placeholder="Tempel isi file JSON service account (Project settings → Service accounts → Generate new private key)"></textarea>' : '') + '</div>' +
+            '<div class="field"><label for="tlDb">URL Realtime Database</label><input id="tlDb" type="url" value="' + esc(d.db_url) + '" placeholder="https://<project>-default-rtdb.asia-southeast1.firebasedatabase.app"' + (sup ? '' : ' disabled') + '></div>' +
+            '<div class="field"><label for="tlCj">Config klien Firebase (JSON)</label><textarea id="tlCj" rows="5"' + (sup ? '' : ' disabled') + ' placeholder=\'{"android":{"apiKey":"…","appId":"1:…:android:…","messagingSenderId":"…","projectId":"…"},"web":{"apiKey":"…","appId":"1:…:web:…","messagingSenderId":"…","projectId":"…","authDomain":"….firebaseapp.com"},"vapidKey":"…"}\'>' + esc(d.client_json || '') + '</textarea>' +
+            '<div class="hint">Nilai publik dari Project settings → General → Your apps. vapidKey dari Cloud Messaging → Web Push certificates.</div></div>' +
+            '<div class="field"><label for="tlApk">Link unduh APK</label><input id="tlApk" type="url" value="' + esc(d.apk_url) + '"' + (sup ? '' : ' disabled') + '></div>' +
+            '<div class="field"><label for="tlPwa">Link web app (PWA)</label><input id="tlPwa" type="url" value="' + esc(d.pwa_url) + '"' + (sup ? '' : ' disabled') + '></div>' +
+            '<div class="field"><label for="tlVer">Versi app terbaru</label><input id="tlVer" type="text" value="' + esc(d.app_version) + '" placeholder="1.0.0"' + (sup ? '' : ' disabled') + '></div>',
+            '<div id="dlgMsg" class="msg err hidden" style="flex:1 1 100%;margin:0"></div><button class="btn ghost" onclick="closeModal()">Tutup</button>' + (sup ? '<button class="btn" id="tlSetBtn" onclick="tlSettingsSave()">Simpan</button>' : ''), true);
+    }).catch(function (e) { toast(e.message, 4000); });
+}
+function tlSettingsSave() {
+    var input = { db_url: $('tlDb').value, client_json: $('tlCj').value.trim(), apk_url: $('tlApk').value, pwa_url: $('tlPwa').value, app_version: $('tlVer').value };
+    if ($('tlSa').value.trim()) input.sa_json = $('tlSa').value.trim();
+    $('tlSetBtn').disabled = true;
+    api('adminConnectSettingsSave', input).then(function (r) { if (!r.success) throw new Error(r.message); closeModal(); toast('Pengaturan tersimpan'); if (TL.slug) tlLoad(); })
+        .catch(function (e) { $('tlSetBtn').disabled = false; setMsg($('dlgMsg'), e.message); });
+}
+</script>

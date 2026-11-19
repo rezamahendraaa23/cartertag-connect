@@ -1,0 +1,43 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "c": {
+      "$slug": {
+        ".read": "auth != null && auth.token.konser === $slug",
+        "env": {
+          ".indexOn": ["t"],
+          "$id": {
+            ".write": "auth != null && auth.token.konser === $slug && !data.exists() && newData.exists()",
+            ".validate": "newData.hasChildren(['e', 't', 'f']) && newData.child('e').isString() && newData.child('e').val().length < 8000 && newData.child('t').val() <= now + 60000 && $id.matches(/^[0-9a-f]{32}$/)"
+          }
+        },
+        "acks": {
+          "$id": {
+            "$mid": {
+              ".write": "auth != null && auth.token.konser === $slug && auth.token.mid === $mid"
+            }
+          }
+        },
+        "presence": {
+          "$mid": {
+            ".write": "auth != null && auth.token.konser === $slug && auth.token.mid === $mid"
+          }
+        },
+        "fleet": {
+          "$key": {
+            ".write": "auth != null && auth.token.konser === $slug",
+            ".validate": "newData.hasChildren(['st', 'at', 'by']) && newData.child('by').val() === auth.token.mid"
+          }
+        },
+        "sos": {
+          "$id": {
+            ".write": "auth != null && auth.token.konser === $slug && (!data.exists() || data.child('by').val() === auth.token.mid || auth.token.role === 'koordinator')"
+          }
+        },
+        "ann": { ".write": false },
+        "meta": { ".write": false }
+      }
+    }
+  }
+}

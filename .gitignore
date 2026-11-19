@@ -1,0 +1,34 @@
+# Flutter / Dart
+app/.dart_tool/
+app/build/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/.packages
+app/*.iml
+app/.idea/
+app/android/.gradle/
+app/android/.kotlin/
+app/android/local.properties
+app/android/app/.cxx/
+app/android/app/src/main/assets/bridge_web/
+app/android/**/GeneratedPluginRegistrant.java
+app/android/key.properties
+*.jks
+*.keystore
+
+# Firebase
+.firebase/
+firebase-debug.log
+database-debug.log
+
+# Hasil build & rahasia
+*.apk
+*.aab
+service-account*.json
+*-firebase-adminsdk-*.json
+.env
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
