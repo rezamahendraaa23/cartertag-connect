@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -19,6 +20,7 @@ import 'api.dart';
 import 'bridge_client.dart';
 import 'location.dart';
 import 'mesh.dart';
+import 'my_ids_io.dart' if (dart.library.js_interop) 'my_ids_web.dart';
 import 'notifier.dart';
 import 'online.dart';
 import 'updater.dart';
@@ -286,6 +288,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     _extraRoster.clear();
     mySosId = null;
     concert = null;
+    unawaited(Online.i.syncTopics(const []));
     notifyListeners();
   }
 
@@ -298,6 +301,17 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Map<String, String> _names() => {for (final m in roster) m.id: m.name};
+
+  /// member_id saya di semua konser tersimpan, dibaca handler push latar (main.dart) supaya push dari diri sendiri diabaikan.
+  Future<void> _writeMyIds() async {
+    if (kIsWeb) return;
+    try {
+      final ids = [
+        for (final b in await savedConcerts()) '${(b['member'] as Map?)?['mid'] ?? ''}',
+      ]..removeWhere((e) => e.isEmpty);
+      await writeMyIdsFile(ids);
+    } catch (_) {}
+  }
 
   Future<void> _setupKeys() async {
     final c = concert!;
@@ -340,9 +354,10 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       ..clear()
       ..addAll(extra == null ? {} : (jsonDecode(extra) as Map).map((k, v) => MapEntry('$k', (v as Map).cast<String, dynamic>())));
     await _setupKeys();
+    unawaited(_writeMyIds());
     fleetCache.clear();
     for (final r in await s.fleet.find(s.db, finder: Finder(filter: Filter.equals('slug', c.slug)))) {
-      fleetCache['${r.value['car']}|${r.value['leg']}'] = '${r.value['st']}';
+      fleetCache['${r.value['car']}|${r.value['leg']}'] = ('${r.value['st']}', (r.value['at'] as num?)?.toInt() ?? 0);
     }
     // SOS saya yang masih aktif sebelum app ditutup: lanjutkan kirim ulang berkala
     mySosId = await s.get<String>('my_sos_${c.slug}');
@@ -384,7 +399,8 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     unawaited(Online.i.attach(c).then((_) => notifyListeners()));
     _tick = Timer.periodic(const Duration(seconds: 4), (_) => _flushOutbox());
     _helloTimer = Timer.periodic(const Duration(minutes: 15), (_) => _hello());
-    _refreshTimer = Timer.periodic(const Duration(minutes: 30), (_) {
+    // data tim jarang berubah & pesan realtime lewat Firebase: refresh ke GAS cukup tiap 2 jam (hemat kuota akun Google)
+    _refreshTimer = Timer.periodic(const Duration(hours: 2), (_) {
       if (netUp) refresh();
     });
     Future.delayed(const Duration(seconds: 3), _hello);
@@ -559,25 +575,35 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   /// Minta GAS mengirim push FCM untuk pesan yang baru masuk server (kalau Firebase aktif).
+  /// Hemat kuota GAS (dibagi dengan form registrasi di akun yang sama): chat biasa paling banyak
+  /// 1 permintaan per channel per 15 detik (pesan beruntun digabung); SOS, pengumuman, absen, kendala langsung.
   final _notifyQueue = <String, List<String>>{};
-  Timer? _notifyTimer;
+  final _lastNotify = <String, int>{};
+  final _notifyTimers = <String, Timer>{};
+  static const _notifyGapMs = 15000;
+
   void _notifyServer(Map v) {
     final type = v['type'] as int? ?? 0;
-    if (type == EType.loc || type == EType.ack || type == EType.control) return;
+    final prio = (v['prio'] as num?)?.toInt() ?? 0;
+    // tidak perlu push: lokasi, tanda terima, profil, check-in penumpang, status armada biasa (bukan kendala)
+    if (type == EType.loc || type == EType.ack || type == EType.control || type == EType.checkin) return;
+    if (type == EType.fleet && prio < Prio.high) return;
     final ch = '${v['ch']}';
-    final key = '$ch|${v['prio'] ?? 0}|$type';
+    final key = '$ch|$prio|$type';
     (_notifyQueue[key] ??= []).add('${v['id'] ?? v['at']}');
-    _notifyTimer ??= Timer(const Duration(seconds: 2), () async {
-      _notifyTimer = null;
-      final q = Map.of(_notifyQueue);
-      _notifyQueue.clear();
-      for (final e in q.entries) {
-        final p = e.key.split('|');
-        final kind = switch (int.parse(p[2])) { EType.sos => 'sos', EType.ann => 'ann', EType.rollcall => 'rollcall', EType.fleet => 'fleet', _ => 'msg' };
-        try {
-          await Api.call('notify', {'member_token': concert!.token, 'ch': p[0], 'prio': int.parse(p[1]), 'kind': kind, 'msg_ids': e.value});
-        } catch (_) {}
-      }
+    final urgent = prio >= Prio.high || type == EType.sos || type == EType.ann || type == EType.rollcall;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final wait = urgent ? 1500 : max(1500, _notifyGapMs - (now - (_lastNotify[key] ?? 0)));
+    if (_notifyTimers[key] != null) return; // sudah dijadwalkan: pesan ini ikut digabung
+    _notifyTimers[key] = Timer(Duration(milliseconds: wait), () async {
+      _notifyTimers.remove(key);
+      final ids = _notifyQueue.remove(key) ?? const [];
+      if (ids.isEmpty || concert == null) return;
+      _lastNotify[key] = DateTime.now().millisecondsSinceEpoch;
+      final kind = switch (type) { EType.sos => 'sos', EType.ann => 'ann', EType.rollcall => 'rollcall', EType.fleet => 'fleet', _ => 'msg' };
+      try {
+        await Api.call('notify', {'member_token': concert!.token, 'ch': ch, 'prio': prio, 'kind': kind, 'msg_ids': ids.take(20).toList()});
+      } catch (_) {}
     });
   }
 
@@ -1099,7 +1125,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     final at = (p['at'] as num?)?.toInt() ?? 0;
     if (cur != null && ((cur['at'] as num?)?.toInt() ?? 0) > at) return;
     await rec.put(s.db, {'slug': slug, 'car': '${p['car']}', 'leg': p['leg'], 'st': p['st'], 'note': p['note'] ?? '', 'at': at, 'by': from, 'lat': p['lat'], 'lng': p['lng'], 'prev': cur?['st']});
-    fleetCache['${p['car']}|${p['leg']}'] = '${p['st']}';
+    fleetCache['${p['car']}|${p['leg']}'] = ('${p['st']}', at);
   }
 
   Future<void> _applyCheckin(Map<String, dynamic> p) async {
@@ -1159,13 +1185,27 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<int> lastRead(String channel) async => (await s.get<int>('read_${slug}_$channel')) ?? 0;
 
-  /// Status armada terakhir per "mobil|leg" (cermin store fleet, untuk keputusan cepat tanpa query).
-  final Map<String, String> fleetCache = {};
+  /// Status armada terakhir per "mobil|leg" -> (status, waktu ms). Cermin store fleet untuk keputusan cepat.
+  final Map<String, (String, int)> fleetCache = {};
 
   static const legDone = {'tiba', 'selesai'};
 
-  /// Leg pergi mobil ini sudah selesai (Tiba / Selesai)?
-  bool pergiDone(String car) => legDone.contains(fleetCache['$car|pergi']);
+  /// "Hari konser": dimulai jam 06.00, bukan 00.00. Pulang lewat tengah malam tetap ikut hari konser yang sama
+  /// dengan pergi sorenya; mulai 06.00 status armada & manifest pindah ke hari konser berikutnya.
+  static const dayStartHour = 6;
+  static String concertDay([int? ms]) {
+    final t = DateTime.fromMillisecondsSinceEpoch(ms ?? DateTime.now().millisecondsSinceEpoch).subtract(const Duration(hours: dayStartHour));
+    return '${t.year.toString().padLeft(4, '0')}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
+  }
+
+  /// Status armada ini milik hari konser yang sedang berjalan?
+  static bool isCurrent(num? at) => at != null && concertDay(at.toInt()) == concertDay();
+
+  /// Leg pergi mobil ini (hari ini) sudah selesai (Tiba / Selesai)?
+  bool pergiDone(String car) {
+    final v = fleetCache['$car|pergi'];
+    return v != null && legDone.contains(v.$1) && isCurrent(v.$2);
+  }
 
   /// Leg aktif: selalu "pergi" dulu; "pulang" setelah leg pergi mobil itu Tiba/Selesai.
   String currentLeg([String? car]) {

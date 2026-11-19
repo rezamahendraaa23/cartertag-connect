@@ -127,6 +127,26 @@ class Mesh {
 
   Future<void> bridgeKick(String client) => _m.invokeMethod('bridgeKick', {'client': client});
 
+  /// Merek HP (huruf kecil), mis. "xiaomi", "oppo".
+  Future<String> brand() async {
+    if (!supported) return '';
+    try {
+      return (await _m.invokeMethod<String>('brand')) ?? '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// Buka layar Autostart vendor. false = tidak ketemu, dibuka info aplikasi sebagai gantinya.
+  Future<bool> openAutostart() async {
+    if (!supported) return false;
+    try {
+      return (await _m.invokeMethod<bool>('autostart')) ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> requestBatteryExemption() async {
     if (!supported) return;
     await _m.invokeMethod('batteryExempt');

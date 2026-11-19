@@ -10,6 +10,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'core/theme.dart';
 import 'data/store.dart';
 import 'services/hub.dart';
+import 'services/my_ids_io.dart' if (dart.library.js_interop) 'services/my_ids_web.dart';
 import 'services/notifier.dart';
 import 'ui/onboarding.dart';
 import 'ui/root.dart';
@@ -18,6 +19,8 @@ import 'ui/root.dart';
 @pragma('vm:entry-point')
 Future<void> _fcmBackground(RemoteMessage m) async {
   final d = m.data;
+  // pengirim ikut berlangganan topik: abaikan push dari diri sendiri
+  if ((await readMyIdsFile()).contains('${d['from'] ?? ''}')) return;
   final p = FlutterLocalNotificationsPlugin();
   await p.initialize(settings: const InitializationSettings(android: AndroidInitializationSettings('@mipmap/ic_launcher')));
   final kind = d['kind'] ?? 'msg';

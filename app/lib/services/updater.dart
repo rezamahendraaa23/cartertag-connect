@@ -1,7 +1,11 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/store.dart';
@@ -25,6 +29,12 @@ class Updater extends ChangeNotifier {
   static const repo = 'rezamahendraaa23/cartertag-connect';
   Release? available;
   bool checking = false;
+
+  /// Unduhan dalam app: null = tidak sedang mengunduh; 0..1 = progres.
+  double? progress;
+  String? error;
+  String? _apkPath;
+  static const _ch = MethodChannel('ct/update');
 
   /// "1.2.10" > "1.2.9"
   static int compare(String a, String b) {
@@ -77,12 +87,81 @@ class Updater extends ChangeNotifier {
     }
   }
 
-  /// Buka unduhan APK di browser; Android lalu menawarkan pemasangan (update di atas versi lama).
+  /// Unduh APK di dalam app (dengan progres), lalu buka layar pemasangan Android. Tanpa browser.
   Future<void> download() async {
     final r = available;
-    if (r == null) return;
-    await launchUrl(Uri.parse(r.apkUrl), mode: LaunchMode.externalApplication);
+    if (r == null || progress != null) return;
+    if (downloaded && _apkPath!.contains(r.version)) return install();
+    if (kIsWeb) {
+      await launchUrl(Uri.parse(r.apkUrl), mode: LaunchMode.externalApplication);
+      return;
+    }
+    error = null;
+    progress = 0;
+    notifyListeners();
+    final client = http.Client();
+    try {
+      final dir = Directory('${(await getTemporaryDirectory()).path}/updates');
+      await dir.create(recursive: true);
+      final file = File('${dir.path}/CarterTag-Connect-${r.version}.apk');
+      final res = await client.send(http.Request('GET', Uri.parse(r.apkUrl))).timeout(const Duration(seconds: 30));
+      if (res.statusCode != 200) throw HttpException('HTTP ${res.statusCode}');
+      final total = res.contentLength ?? 0;
+      final sink = file.openWrite();
+      var got = 0, lastNotify = 0;
+      await for (final chunk in res.stream) {
+        sink.add(chunk);
+        got += chunk.length;
+        if (total > 0 && got - lastNotify > 256 * 1024) {
+          lastNotify = got;
+          progress = got / total;
+          notifyListeners();
+        }
+      }
+      await sink.close();
+      if (total > 0 && got < total) throw const HttpException('Unduhan terputus');
+      _apkPath = file.path;
+      progress = 1;
+      notifyListeners();
+      await install();
+    } catch (e) {
+      error = 'Gagal mengunduh: $e';
+    } finally {
+      client.close();
+      progress = null;
+      notifyListeners();
+    }
   }
+
+  /// Serahkan APK ke installer. Izin "pasang dari sumber ini" belum ada -> buka pengaturannya,
+  /// lalu pasang otomatis begitu pengguna kembali ke app.
+  Future<void> install() async {
+    final path = _apkPath;
+    if (path == null) return;
+    final can = await _ch.invokeMethod<bool>('canInstall') ?? true;
+    if (!can) {
+      await _ch.invokeMethod('allowInstall');
+      _waitResume();
+      return;
+    }
+    await _ch.invokeMethod('install', {'path': path});
+  }
+
+  void _waitResume() {
+    late final AppLifecycleListener l;
+    l = AppLifecycleListener(onResume: () async {
+      l.dispose();
+      if (await _ch.invokeMethod<bool>('canInstall') == true) {
+        await _ch.invokeMethod('install', {'path': _apkPath});
+      } else {
+        error = 'Izinkan "Pasang aplikasi tidak dikenal" untuk CarterTag Connect, lalu ketuk Update lagi.';
+        notifyListeners();
+      }
+    });
+  }
+
+  /// APK sudah terunduh (mis. pemasangan dibatalkan): bisa langsung dipasang ulang tanpa unduh lagi.
+  bool get downloaded => _apkPath != null && File(_apkPath!).existsSync();
 
   Future<void> dismiss() async {
     final r = available;

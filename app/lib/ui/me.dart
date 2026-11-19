@@ -92,6 +92,17 @@ class _MeScreenState extends State<MeScreen> {
         ),
         ListTile(
           minTileHeight: 56,
+          leading: const Icon(LucideIcons.rocket),
+          title: const Text('Tetap aktif di latar'),
+          subtitle: const Text('Autostart & baterai (penting untuk Xiaomi, Oppo, Vivo, Realme)'),
+          trailing: const Icon(LucideIcons.chevronRight),
+          onTap: () async {
+            await Mesh.i.requestBatteryExemption();
+            await Mesh.i.openAutostart();
+          },
+        ),
+        ListTile(
+          minTileHeight: 56,
           leading: const Icon(LucideIcons.qrCode),
           title: const Text('Undang via QR'),
           subtitle: const Text('Anggota baru gabung tanpa internet'),
@@ -160,13 +171,18 @@ class _MeScreenState extends State<MeScreen> {
         ListenableBuilder(
           listenable: Updater.i,
           builder: (context, _) {
-            final up = Updater.i.available;
+            final u = Updater.i, up = u.available;
             return ListTile(
               minTileHeight: 56,
               leading: Icon(up != null ? LucideIcons.download : LucideIcons.refreshCw, color: up != null ? c.accent : null),
               title: Text(up != null ? 'Update ke versi ${up.version}' : 'Cek pembaruan'),
-              subtitle: Text(Updater.i.checking ? 'Memeriksa…' : 'Versi terpasang ${h.appVersion}'),
-              onTap: Updater.i.checking
+              subtitle: u.progress != null
+                  ? Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: LinearProgressIndicator(value: u.progress, minHeight: 5, color: c.accent, backgroundColor: c.cardLow),
+                    )
+                  : Text(u.error ?? (u.checking ? 'Memeriksa…' : 'Versi terpasang ${h.appVersion}')),
+              onTap: u.checking || u.progress != null
                   ? null
                   : () async {
                       if (up != null) return Updater.i.download();

@@ -73,12 +73,22 @@ class WelcomeScreen extends StatelessWidget {
 }
 
 class _PermStep {
-  const _PermStep(this.icon, this.title, this.text, this.perms);
+  const _PermStep(this.icon, this.title, this.text, this.perms, {this.kind = ''});
   final IconData icon;
   final String title;
   final String text;
   final List<Permission> perms;
+
+  /// '' = izin biasa / baterai, 'autostart' = pengaturan Autostart vendor (tidak bisa dicek, ditampilkan sekali)
+  final String kind;
 }
+
+/// Merek yang punya pengaturan Autostart sendiri dan mematikan app di latar kalau belum diaktifkan.
+const _autostartBrands = ['xiaomi', 'redmi', 'poco', 'oppo', 'realme', 'oneplus', 'vivo', 'iqoo', 'huawei', 'honor', 'infinix', 'tecno', 'itel', 'asus', 'letv'];
+
+const _autostartStep = _PermStep(LucideIcons.rocket, 'Izinkan Autostart',
+    'HP merek ini mematikan app di latar kecuali "Autostart / Mulai otomatis" diaktifkan. Di layar berikutnya, cari CarterTag Connect lalu aktifkan.',
+    [], kind: 'autostart');
 
 /// Langkah izin yang belum diberikan. Kosong = semua sudah diizinkan, layar izin dilewati.
 Future<List<_PermStep>> pendingPermSteps() async {
@@ -91,8 +101,10 @@ Future<List<_PermStep>> pendingPermSteps() async {
       // izin yang tidak berlaku di versi Android ini dianggap sudah beres
       if (!(st.isGranted || st.isLimited || st == PermissionStatus.restricted)) granted = false;
     }
-    if (!granted) out.add(s);
+      if (!granted) out.add(s);
   }
+  final brand = await Mesh.i.brand();
+  if (_autostartBrands.any(brand.contains) && await Hub.i.s.get<bool>('autostart_done') != true) out.add(_autostartStep);
   return out;
 }
 
@@ -130,7 +142,10 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
   Future<void> _allow() async {
     setState(() => busy = true);
     final s = steps[step];
-    if (s.perms.isEmpty) {
+    if (s.kind == 'autostart') {
+      await Mesh.i.openAutostart();
+      await Hub.i.s.put('autostart_done', true);
+    } else if (s.perms.isEmpty) {
       final r = await Permission.ignoreBatteryOptimizations.request();
       if (!r.isGranted) denied.add(s.title);
     } else {
@@ -180,7 +195,7 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
               InfoBanner(margin: EdgeInsets.zero, tone: Tone.warn, text: 'Ditolak: ${denied.join(', ')}. Bisa diizinkan nanti di Pengaturan HP.'),
             ],
             const Spacer(flex: 2),
-            FilledButton(onPressed: busy ? null : _allow, child: Text(busy ? 'Menunggu…' : 'Izinkan')),
+            FilledButton(onPressed: busy ? null : _allow, child: Text(busy ? 'Menunggu…' : (s.kind == 'autostart' ? 'Buka pengaturan Autostart' : 'Izinkan'))),
             const SizedBox(height: 6),
             TextButton(onPressed: busy ? null : _advance, child: const Text('Nanti saja')),
           ]),
@@ -373,6 +388,17 @@ class _JoinScreenState extends State<JoinScreen> {
               ]),
               const SizedBox(height: 18),
             ] else ...[
+              // Link gabung terbuka di browser Android padahal app sudah terpasang: paksa buka app (intent://)
+              if (defaultTargetPlatform == TargetPlatform.android && code.text.length == 6) ...[
+                FilledButton.icon(
+                  onPressed: () => launchUrl(Uri.parse('intent://cartertag-connect.web.app/join?kode=CT-${code.text}'
+                      '#Intent;scheme=https;package=id.cartertag.connect;'
+                      'S.browser_fallback_url=${Uri.encodeComponent('https://github.com/rezamahendraaa23/cartertag-connect/releases/latest')};end')),
+                  icon: const Icon(LucideIcons.externalLink),
+                  label: const Text('Buka di aplikasi'),
+                ),
+                const SizedBox(height: 12),
+              ],
               InfoBanner(
                 margin: EdgeInsets.zero,
                 tone: Tone.info,

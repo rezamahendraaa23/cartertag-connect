@@ -41,6 +41,7 @@ class RadarScreen extends StatefulWidget {
 class _RadarScreenState extends State<RadarScreen> {
   Fix? me = LocationSvc.i.last;
   bool share = true;
+  late final _locs = Hub.i.watch(Hub.i.s.locations);
   Timer? _t;
 
   @override
@@ -67,7 +68,7 @@ class _RadarScreenState extends State<RadarScreen> {
     final h = Hub.i;
     final c = CT.of(context);
     return StreamBuilder<List<RecordSnapshot<String, Map<String, Object?>>>>(
-      stream: h.watch(h.s.locations),
+      stream: _locs,
       builder: (context, snap) {
         final locs = snap.data ?? const [];
         final targets = <Target>[

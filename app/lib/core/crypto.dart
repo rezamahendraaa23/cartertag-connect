@@ -3,7 +3,10 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+import '../data/store.dart';
 
 import 'envelope.dart';
 
@@ -25,14 +28,18 @@ class DeviceKeys {
   /// Kunci dibuat sekali per perangkat, disimpan di Android Keystore (web: storage terenkripsi).
   static Future<DeviceKeys> load() async {
     if (_instance != null) return _instance!;
-    var sx = await _storage.read(key: 'seed_x');
-    var se = await _storage.read(key: 'seed_ed');
+    // Web: simpan di IndexedDB (Store). flutter_secure_storage di web butuh WebCrypto yang mati di halaman http
+    // (Mode Jembatan iPhone dibuka lewat http://192.168.49.1), jadi kunci tidak bisa dibuat di sana.
+    Future<String?> read(String k) => kIsWeb ? Store.i.get<String>(k) : _storage.read(key: k);
+    Future<void> write(String k, String v) => kIsWeb ? Store.i.put(k, v) : _storage.write(key: k, value: v);
+    var sx = await read('seed_x');
+    var se = await read('seed_ed');
     if (sx == null || se == null) {
       final r = Random.secure();
       sx = base64Encode(List.generate(32, (_) => r.nextInt(256)));
       se = base64Encode(List.generate(32, (_) => r.nextInt(256)));
-      await _storage.write(key: 'seed_x', value: sx);
-      await _storage.write(key: 'seed_ed', value: se);
+      await write('seed_x', sx);
+      await write('seed_ed', se);
     }
     final x = await X25519().newKeyPairFromSeed(base64Decode(sx));
     final ed = await Ed25519().newKeyPairFromSeed(base64Decode(se));

@@ -5,6 +5,7 @@ import 'package:cartertag_connect/core/crypto.dart';
 import 'package:cartertag_connect/core/envelope.dart';
 import 'package:cartertag_connect/core/ids.dart';
 import 'package:cartertag_connect/data/models.dart';
+import 'package:cartertag_connect/services/hub.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -91,6 +92,16 @@ void main() {
     expect(carDigits('C3'), '3');
     expect(carDigits('mobil 12'), '12');
     expect(koord.tagLabel, 'Rina');
+  });
+
+  test('hari konser mulai 06.00: pulang lewat tengah malam tetap hari yang sama', () {
+    int at(int d, int h, [int m = 0]) => DateTime(2026, 9, d, h, m).millisecondsSinceEpoch;
+    expect(Hub.concertDay(at(26, 15)), '2026-09-26'); // pergi sore hari 1
+    expect(Hub.concertDay(at(26, 23, 59)), '2026-09-26');
+    expect(Hub.concertDay(at(27, 3)), '2026-09-26'); // pulang jam 3 pagi: masih hari konser 1
+    expect(Hub.concertDay(at(27, 5, 59)), '2026-09-26');
+    expect(Hub.concertDay(at(27, 6)), '2026-09-27'); // mulai 06.00: hari konser 2
+    expect(Hub.concertDay(at(27, 14)), '2026-09-27');
   });
 
   test('dmChannel urutan stabil', () {

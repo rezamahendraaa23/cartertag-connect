@@ -130,17 +130,30 @@ class _HomeShellState extends State<HomeShell> {
             ListenableBuilder(
               listenable: Updater.i,
               builder: (context, _) {
-                final up = Updater.i.available;
+                final u = Updater.i, up = u.available;
                 if (up == null || updateHidden == up.version) return const SizedBox.shrink();
+                if (u.progress != null) {
+                  return Container(
+                    margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                    decoration: BoxDecoration(color: c.accentBg, borderRadius: BorderRadius.circular(12)),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(u.progress! >= 1 ? 'Membuka pemasangan…' : 'Mengunduh versi ${up.version}… ${(u.progress! * 100).round()}%',
+                          style: const TextStyle(fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 8),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: LinearProgressIndicator(value: u.progress, minHeight: 6, color: c.accent, backgroundColor: c.card),
+                      ),
+                    ]),
+                  );
+                }
                 return InfoBanner(
-                  tone: Tone.info,
+                  tone: u.error != null ? Tone.warn : Tone.info,
                   icon: LucideIcons.download,
-                  text: 'Versi baru ${up.version} tersedia.',
-                  action: 'Update',
-                  onAction: () {
-                    Updater.i.download();
-                    setState(() => updateHidden = up.version);
-                  },
+                  text: u.error ?? 'Versi baru ${up.version} tersedia.',
+                  action: u.downloaded ? 'Pasang' : 'Update',
+                  onAction: () => Updater.i.download(),
                 );
               },
             ),

@@ -179,8 +179,33 @@ function connectCarInfo_(ss, car) {
   return hit;
 }
 
-/** Anggota konser = semua yang sudah gabung pakai kode (tab Tim Lapangan). Tidak perlu didaftarkan admin. */
-function connectTeam_() {
+/**
+ * Anggota konser = semua yang sudah gabung pakai kode (tab Tim Lapangan). Tidak perlu didaftarkan admin.
+ * Disimpan di cache 2 menit supaya refresh/notify tidak membaca Sheet di setiap panggilan;
+ * fresh = baca langsung dari Sheet (dipakai sebelum menulis), dan cache dibuang setiap ada perubahan anggota.
+ */
+function connectTeam_(fresh) {
+  var key = 'CT_TEAM_' + _konser.slug, cache = CacheService.getScriptCache();
+  if (!fresh) {
+    try {
+      var hit = cache.get(key);
+      if (hit) {
+        var list0 = JSON.parse(hit), byId0 = {};
+        list0.forEach(function (m) { byId0[m.member_id] = m; });
+        return { list: list0, byId: byId0 };
+      }
+    } catch (e) { /* cache rusak: baca ulang */ }
+  }
+  var team = connectTeamRead_();
+  try { cache.put(key, JSON.stringify(team.list), 120); } catch (e) { /* > 100 KB: tanpa cache */ }
+  return team;
+}
+
+function connectTeamClear_() {
+  try { CacheService.getScriptCache().remove('CT_TEAM_' + _konser.slug); } catch (e) { /* abaikan */ }
+}
+
+function connectTeamRead_() {
   var ss = connectSs_(), byId = {}, list = [];
   readTableIn_(ss, CONNECT_TAB.TEAM).forEach(function (r) {
     var mid = String(r.member_id || '');
@@ -224,6 +249,7 @@ function connectUpsertMember_(m) {
   if (m._row) updateObjectIn_(ss, CONNECT_TAB.TEAM, m._row, row);
   else m._row = appendObjectIn_(ss, CONNECT_TAB.TEAM, row);
   m.last_seen = now;
+  connectTeamClear_();
   return m;
 }
 
@@ -271,7 +297,7 @@ function connectBundle_(k, cfg, team, me) {
   var dates = (k.config.dates || []).slice();
   // options = konfigurasi klien Firebase (publik): {android:{apiKey, appId, messagingSenderId, projectId}, web:{..., authDomain}, vapidKey}
   var fb = connectFirebaseReady_() ? { custom_token: connectCustomToken_(k.slug, me), db_url: setting_('FIREBASE_DB_URL'),
-    options: parseJson_(setting_('FIREBASE_CLIENT_JSON'), null) } : null;
+    options: parseJson_(setting_('FIREBASE_CLIENT_JSON'), null), topics: connectTopicsFor_(k.slug, me) } : null;
   return {
     member: connectRosterEntry_(me),
     member_token: connectMakeToken_(k.slug, me.member_id),
@@ -319,7 +345,7 @@ function connectJoin_(b) {
   var cfg = connectCfg_(k);
 
   return withLock_(function () {
-    var team = connectTeam_(), mid = connectMemberId_(k.slug, String(b.pub_ed)), me = team.byId[mid];
+    var team = connectTeam_(true), mid = connectMemberId_(k.slug, String(b.pub_ed)), me = team.byId[mid];
     if (me && me.status === 'dikeluarkan') throw connectError_('removed', 'HP ini sudah dikeluarkan dari tim konser. Hubungi koordinator.');
     if (!me) {
       me = { member_id: mid, hp: '', cars: [], area: '', _row: 0 };
@@ -350,14 +376,39 @@ function connectRefresh_(b) {
   if (b.app_version && b.app_version !== me.app_version) { me.app_version = cap_(b.app_version, 20); changed = true; }
   // last_seen ditulis paling sering tiap 10 menit per anggota (hemat kuota tulis sheet)
   var c = CacheService.getScriptCache(), seenKey = 'CS_' + _konser.slug + '_' + me.member_id;
-  if (changed || !c.get(seenKey)) { withLock_(function () { connectUpsertMember_(me); }); c.put(seenKey, '1', 600); }
+  if (changed || !c.get(seenKey)) {
+    withLock_(function () { var fresh = connectTeam_(true).byId[me.member_id]; if (fresh) { me._row = fresh._row; connectUpsertMember_(me); } });
+    c.put(seenKey, '1', 600);
+  }
   return connectBundle_(a.konser, a.cfg, a.team, me);
 }
 
 // ============================================================ notifikasi (FCM)
 
+/** Nama topik FCM per konser: all (semua), koord (koordinator), a_<area> (driver area itu). */
+function connectTopic_(slug, scope) {
+  return ('ct_' + slug + '_' + scope).replace(/[^a-zA-Z0-9\-_.~%]/g, '_').substring(0, 200);
+}
+function connectAreaScope_(area) { return 'a_' + String(area || '').toLowerCase().replace(/[^a-z0-9]+/g, '_'); }
+
+/** App 1.3.0+ berlangganan topik; versi lebih lama tetap dikirim per token. */
+function connectTopicReady_(ver) {
+  var p = String(ver || '0').split('.').map(function (x) { return parseInt(x, 10) || 0; });
+  return (p[0] || 0) > 1 || ((p[0] || 0) === 1 && (p[1] || 0) >= 3);
+}
+
+/** Topik yang wajib diikuti HP Android anggota ini (dikirim di bundle join/refresh). */
+function connectTopicsFor_(slug, m) {
+  var t = [connectTopic_(slug, 'all')];
+  if (m.role !== 'driver') t.push(connectTopic_(slug, 'koord'));
+  if (m.area) t.push(connectTopic_(slug, connectAreaScope_(m.area)));
+  return t;
+}
+
 /**
  * Fan-out FCM data-message (tanpa isi pesan — isi terenkripsi, app mengambil sendiri dari RTDB).
+ * HP Android menerima lewat TOPIK (1 panggilan untuk semua), web/iPhone dikirim per token (biasanya sedikit).
+ * Pengirim juga berlangganan topik, jadi app mengabaikan push dengan "from" = dirinya sendiri.
  * ch: 'g' semua, 'k' koordinator & panitia, 'a:<area>' anggota area itu + koordinator, 'd:<mid>:<mid>' lawan bicara.
  */
 function connectNotify_(b) {
@@ -365,8 +416,16 @@ function connectNotify_(b) {
   if (!connectFirebaseReady_()) return { sent: 0, reason: 'firebase_not_configured' };
   var ch = String(b.ch || 'g'), prio = parseInt(b.prio, 10) || 0, me = a.me;
   var hit = connectRateLimit_('CN_' + _konser.slug + '_' + me.member_id, prio >= 2 ? 1000 : 120, 60); hit();
+  var isDm = ch.indexOf('d:') === 0;
+  var topics = [];
+  if (!isDm) {
+    if (prio >= 1 || ch === 'g') topics = [connectTopic_(_konser.slug, 'all')];
+    else if (ch === 'k') topics = [connectTopic_(_konser.slug, 'koord')];
+    else if (ch.indexOf('a:') === 0) topics = [connectTopic_(_konser.slug, connectAreaScope_(ch.substring(2))), connectTopic_(_konser.slug, 'koord')];
+  }
   var targets = a.team.list.filter(function (m) {
     if (m.member_id === me.member_id || !m.fcm_token || m.status !== 'aktif') return false;
+    if (!isDm && m.platform !== 'web' && connectTopicReady_(m.app_version)) return false;   // Android 1.3.0+ sudah lewat topik
     if (prio >= 1) return true;   // pengumuman / SOS ke semua
     if (ch === 'g') return true;
     if (ch === 'k') return m.role !== 'driver';
@@ -376,17 +435,19 @@ function connectNotify_(b) {
   });
   var data = { slug: _konser.slug, ch: ch, from: me.member_id, from_name: me.nama, kind: String(b.kind || 'msg').substring(0, 20),
     title: cap_(b.title, 80), ids: (b.msg_ids || []).slice(0, 20).join(','), prio: String(prio) };
-  var sent = connectFcmSend_(targets.map(function (m) { return m.fcm_token; }), data, prio);
-  return { sent: sent };
+  var sent = connectFcmSend_(targets.map(function (m) { return m.fcm_token; }), data, prio, topics);
+  return { sent: sent, topics: topics.length };
 }
 
-function connectFcmSend_(tokens, data, prio) {
-  if (!tokens.length) return 0;
+function connectFcmSend_(tokens, data, prio, topics) {
+  topics = topics || [];
+  if (!tokens.length && !topics.length) return 0;
   var sa = connectSa_(), url = 'https://fcm.googleapis.com/v1/projects/' + sa.project_id + '/messages:send', auth = 'Bearer ' + connectOauth_();
-  var reqs = tokens.map(function (t) {
-    var msg = { message: { token: t, data: data,
+  var targets = tokens.map(function (t) { return { token: t }; }).concat(topics.map(function (t) { return { topic: t }; }));
+  var reqs = targets.map(function (target) {
+    var msg = { message: Object.assign({}, target, { data: data,
       android: { priority: prio >= 1 ? 'HIGH' : 'NORMAL', ttl: prio >= 2 ? '7200s' : '21600s' },
-      webpush: { headers: { Urgency: prio >= 1 ? 'high' : 'normal', TTL: '21600' } } } };
+      webpush: { headers: { Urgency: prio >= 1 ? 'high' : 'normal', TTL: '21600' } } }) };
     return { url: url, method: 'post', contentType: 'application/json', headers: { Authorization: auth }, payload: JSON.stringify(msg), muteHttpExceptions: true };
   });
   var ok = 0;
@@ -618,7 +679,7 @@ function adminConnectMemberUpdate(token, slug, memberId, patch) {
     adminUse_(slug);
     patch = patch || {};
     withLock_(function () {
-      var team = connectTeam_(), m = team.byId[String(memberId)];
+      var team = connectTeam_(true), m = team.byId[String(memberId)];
       if (!m) throw new Error('Anggota tidak ditemukan.');
       if (patch.role !== undefined) {
         if (CONNECT_ROLES.indexOf(patch.role) === -1) throw new Error('Role tidak dikenal.');
@@ -647,8 +708,8 @@ function adminConnectAnnounce(token, slug, ann) {
     var rec = { id: id, title: title, body: body, prio: ann.prio === 'penting' ? 1 : 0, by: 'Console · ' + (_actor ? _actor.name : 'Admin'), at: Date.now() };
     connectRtdb_('PUT', 'c/' + _konser.slug + '/ann/' + id, rec);
     var team = connectTeam_();
-    var sent = connectFcmSend_(team.list.filter(function (m) { return m.status === 'aktif' && m.fcm_token; }).map(function (m) { return m.fcm_token; }),
-      { slug: _konser.slug, ch: 'g', from: 'console', from_name: rec.by, kind: 'ann', title: title, ids: id, prio: '1' }, 1);
+    var sent = connectFcmSend_(team.list.filter(function (m) { return m.status === 'aktif' && m.fcm_token && m.platform === 'web'; }).map(function (m) { return m.fcm_token; }),
+      { slug: _konser.slug, ch: 'g', from: 'console', from_name: rec.by, kind: 'ann', title: title, ids: id, prio: '1' }, 1, [connectTopic_(_konser.slug, 'all')]);
     return { success: true, id: id, sent: sent };
   });
 }

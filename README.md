@@ -79,7 +79,7 @@ firebase deploy --only hosting
 
 APK ada di `app/build/app/outputs/flutter-apk/` (`app-arm64-v8a-release.apk` untuk hampir semua HP Android). Unggah ke Google Drive, isi linknya di Console → Distribusi App.
 
-> **Signing rilis:** build rilis saat ini memakai debug key. Sebelum dibagikan luas, buat keystore sendiri (`keytool -genkey …`) dan isi `signingConfigs` di `app/android/app/build.gradle.kts`. APK yang ditandatangani key berbeda tidak bisa meng-update APK lama.
+> **Signing rilis (mulai 1.3.0):** APK ditandatangani keystore permanen `C:\Users\<user>\.cartertag\cartertag-release.jks` (password di `key.properties` di folder yang sama, disalin ke `app/android/key.properties` yang di-ignore Git). **Backup kedua file itu ke tempat aman** (mis. Google Drive pribadi). Kalau hilang, update app tidak bisa dipasang di atas versi lama; semua HP harus uninstall dulu. Sidik jari SHA-256 kunci ini ada di `app/web/.well-known/assetlinks.json` (untuk link gabung).
 
 ## Alur pakai hari H
 

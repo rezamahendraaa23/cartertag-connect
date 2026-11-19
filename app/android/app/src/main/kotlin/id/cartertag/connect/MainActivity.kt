@@ -95,10 +95,37 @@ class MainActivity : FlutterActivity() {
                     }
                     "bridgeKick" -> { MeshService.instance?.bridgeKick(call.argument<String>("client")!!); result.success(null) }
                     "batteryExempt" -> { requestBatteryExemption(); result.success(null) }
+                    "brand" -> result.success(Build.MANUFACTURER.lowercase())
+                    "autostart" -> result.success(openAutostartSettings())
                     else -> result.notImplemented()
                 }
             } catch (e: Exception) {
                 result.error("mesh", e.message, null)
+            }
+        }
+
+        // Update dalam app: pasang APK yang sudah diunduh Flutter ke cache/updates
+        MethodChannel(messenger, "ct/update").setMethodCallHandler { call, result ->
+            when (call.method) {
+                "canInstall" -> result.success(Build.VERSION.SDK_INT < 26 || packageManager.canRequestPackageInstalls())
+                "allowInstall" -> {
+                    if (Build.VERSION.SDK_INT >= 26) startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                    result.success(null)
+                }
+                "install" -> {
+                    try {
+                        val file = java.io.File(call.argument<String>("path")!!)
+                        val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.files", file)
+                        startActivity(Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(uri, "application/vnd.android.package-archive")
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                        })
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("install", e.message, null)
+                    }
+                }
+                else -> result.notImplemented()
             }
         }
 
@@ -114,6 +141,39 @@ class MainActivity : FlutterActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         routeOf(intent)?.let { routeChannel?.invokeMethod("open", it) }
+    }
+
+    /**
+     * Buka layar "Autostart / Mulai otomatis" milik vendor (Xiaomi, Oppo, Realme, Vivo, Huawei, dll.).
+     * Tanpa ini, vendor tersebut mematikan app di latar walau optimasi baterai sudah dikecualikan.
+     * Kembali true kalau salah satu layar berhasil dibuka; false = buka info aplikasi sebagai cadangan.
+     */
+    private fun openAutostartSettings(): Boolean {
+        val candidates = listOf(
+            "com.miui.securitycenter" to "com.miui.permcenter.autostart.AutoStartManagementActivity",
+            "com.coloros.safecenter" to "com.coloros.safecenter.permission.startup.StartupAppListActivity",
+            "com.coloros.safecenter" to "com.coloros.safecenter.startupapp.StartupAppListActivity",
+            "com.oplus.safecenter" to "com.oplus.safecenter.permission.startup.StartupAppListActivity",
+            "com.oppo.safe" to "com.oppo.safe.permission.startup.StartupAppListActivity",
+            "com.vivo.permissionmanager" to "com.vivo.permissionmanager.activity.BgStartUpManagerActivity",
+            "com.iqoo.secure" to "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity",
+            "com.huawei.systemmanager" to "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity",
+            "com.huawei.systemmanager" to "com.huawei.systemmanager.optimize.process.ProtectActivity",
+            "com.hihonor.systemmanager" to "com.hihonor.systemmanager.startupmgr.ui.StartupNormalAppListActivity",
+            "com.transsion.phonemaster" to "com.cyin.himgr.autostart.AutoStartActivity",
+            "com.asus.mobilemanager" to "com.asus.mobilemanager.autostart.AutoStartActivity",
+            "com.letv.android.letvsafe" to "com.letv.android.letvsafe.AutobootManageActivity"
+        )
+        for ((pkg, cls) in candidates) {
+            try {
+                startActivity(Intent().setClassName(pkg, cls).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                return true
+            } catch (_: Exception) { }
+        }
+        try {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        } catch (_: Exception) { }
+        return false
     }
 
     /** Minta dikecualikan dari optimasi baterai supaya mesh tidak dimatikan sistem (PRD M1.2). */

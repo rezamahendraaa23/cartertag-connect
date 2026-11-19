@@ -297,6 +297,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
   String get ch => widget.channel;
 
+  /// Dibuat sekali: kalau dibuat di build(), setiap ketikan membuat langganan baru dan daftar pesan berkedip.
+  late final Stream<List<Snap>> _msgs = Hub.i.watchMessages(widget.channel);
+
   /// Cari token "@..." tepat sebelum kursor; isi daftar saran anggota.
   void _updateMention() {
     if (ch.startsWith('d:')) return;
@@ -516,7 +519,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       body: Column(children: [
         Expanded(
           child: StreamBuilder<List<Snap>>(
-            stream: Hub.i.watchMessages(ch),
+            stream: _msgs,
             builder: (context, snap) {
               final list = snap.data;
               if (list == null) return const Center(child: CircularProgressIndicator());

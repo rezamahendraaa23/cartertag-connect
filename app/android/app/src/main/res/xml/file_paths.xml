@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- APK pembaruan yang diunduh app (cache/updates) diserahkan ke installer Android lewat FileProvider -->
+<paths>
+    <cache-path name="updates" path="updates/" />
+</paths>

@@ -162,6 +162,7 @@ function tlMonDraw() {
     var count = { jalan: 0, tiba: 0, kendala: 0, sepi: 0 };
     var cards = Object.keys(cars).sort(function (a, b) { return (parseInt(a, 10) || 999) - (parseInt(b, 10) || 999); }).map(function (no) {
         var f = fleet[no + '_' + legOf] || null, d = cars[no], p = (m.presence || {})[d.mid] || {};
+        if (f && tlConcertDay(f.at) !== tlConcertDay(now)) f = null;   // status hari konser sebelumnya (hari konser mulai 06.00)
         var stale = f && ['menuju', 'di_titik', 'berangkat'].indexOf(f.st) !== -1 && now - f.at > 15 * 60000;
         var cls = !f ? '' : (f.st === 'kendala' ? 'bad' : (stale ? 'warn' : (f.st === 'tiba' || f.st === 'selesai' ? 'ok' : 'info')));
         if (f && f.st === 'kendala') count.kendala++; else if (stale) count.sepi++; else if (f && (f.st === 'tiba' || f.st === 'selesai')) count.tiba++; else if (f) count.jalan++;
@@ -180,6 +181,8 @@ function tlMonDraw() {
         '<div class="tl-grid">' + (cards.join('') || '<div class="card hint">Belum ada mobil di Plotingan.</div>') + '</div>' +
         '<p class="hint">Diperbarui ' + new Date(m.at).toLocaleTimeString('id-ID') + ' · otomatis tiap 10 detik. Status dari HP yang offline muncul setelah ada HP tim yang online (gateway).</p>';
 }
+/** Hari konser dimulai 06.00 (pulang lewat tengah malam tetap hari yang sama dengan pergi). */
+function tlConcertDay(ms) { var d = new Date(ms - 6 * 3600000); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
 function tlAgo(ms) { var s = Math.round((Date.now() - ms) / 1000); return s < 60 ? 'baru saja' : (s < 3600 ? Math.round(s / 60) + ' mnt lalu' : Math.round(s / 3600) + ' jam lalu'); }
 
 /* ---- C04 Pengumuman */

@@ -68,6 +68,7 @@ class Online {
       if (auth.currentUser?.uid != uid && fb['custom_token'] != null) {
         await auth.signInWithCustomToken('${fb['custom_token']}');
       }
+      if (!kIsWeb) unawaited(syncTopics(((fb['topics'] as List?) ?? const []).map((e) => '$e').toList()));
       if (_slug == c.slug && _db != null) return true;
       await detach();
       _slug = c.slug;
@@ -178,6 +179,25 @@ class Online {
       if (v is! Map) return <String, Map>{};
       return v.map((k, val) => MapEntry('$k', val is Map ? val : const {}));
     });
+  }
+
+  /// Langganan topik push dari server (konser, koordinator, area). Topik lama yang tidak dipakai lagi dilepas.
+  Future<void> syncTopics(List<String> topics) async {
+    if (kIsWeb || Firebase.apps.isEmpty) return;
+    final old = ((jsonDecode((await Store.i.get<String>('fcm_topics')) ?? '[]') as List?) ?? const []).map((e) => '$e').toSet();
+    final now = topics.toSet();
+    final m = FirebaseMessaging.instance;
+    try {
+      for (final t in old.difference(now)) {
+        await m.unsubscribeFromTopic(t);
+      }
+      for (final t in now) {
+        await m.subscribeToTopic(t);
+      }
+      await Store.i.put('fcm_topics', jsonEncode(now.toList()));
+    } catch (e) {
+      debugPrint('syncTopics: $e');
+    }
   }
 
   /// Token FCM (Android) / Web Push. Null kalau Firebase belum siap atau izin ditolak.

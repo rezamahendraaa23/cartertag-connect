@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:sembast/sembast.dart';
@@ -15,7 +17,11 @@ class FleetData {
   final Map<String, Map<String, Object?>> fleet;
   final Map<String, Map<String, Object?>> checkins;
 
-  Map<String, Object?>? status(String car, String leg) => fleet['$car|$leg'];
+  /// Status hari konser ini (hari konser mulai 06.00; status hari konser sebelumnya diabaikan).
+  Map<String, Object?>? status(String car, String leg) {
+    final v = fleet['$car|$leg'];
+    return v != null && Hub.isCurrent(v['at'] as num?) ? v : null;
+  }
 
   bool stale(String car, String leg) {
     final s = status(car, leg);
@@ -28,16 +34,41 @@ class FleetData {
   String? checkin(ManifestRow r, String leg) => checkins['${r.orderId}|${r.hari}|$leg']?['st'] as String?;
 }
 
+/// Status armada + check-in penumpang. Dua sumber didengarkan sekaligus, jadi tombol Naik / Tidak datang
+/// langsung terlihat (dulu hanya perubahan status armada yang memicu tampilan diperbarui).
 Stream<FleetData> watchFleet() {
   final h = Hub.i;
-  final fleetStream = h.watch(h.s.fleet);
-  return fleetStream.asyncMap((f) async {
-    final ch = await h.s.checkins.find(h.s.db, finder: Finder(filter: Filter.equals('slug', h.slug)));
-    return FleetData(
-      {for (final r in f) '${r.value['car']}|${r.value['leg']}': r.value},
-      {for (final r in ch) '${r.value['order']}|${r.value['hari']}|${r.value['leg']}': r.value},
-    );
-  });
+  late final StreamController<FleetData> ctl;
+  List<RecordSnapshot<String, Map<String, Object?>>> fleet = const [], chk = const [];
+  var gotFleet = false, gotChk = false;
+  StreamSubscription? a, b;
+  void emit() {
+    if (!gotFleet || !gotChk || ctl.isClosed) return;
+    ctl.add(FleetData(
+      {for (final r in fleet) '${r.value['car']}|${r.value['leg']}': r.value},
+      {for (final r in chk) '${r.value['order']}|${r.value['hari']}|${r.value['leg']}': r.value},
+    ));
+  }
+
+  ctl = StreamController<FleetData>(
+    onListen: () {
+      a = h.watch(h.s.fleet).listen((v) {
+        fleet = v;
+        gotFleet = true;
+        emit();
+      });
+      b = h.watch(h.s.checkins).listen((v) {
+        chk = v;
+        gotChk = true;
+        emit();
+      });
+    },
+    onCancel: () async {
+      await a?.cancel();
+      await b?.cancel();
+    },
+  );
+  return ctl.stream;
 }
 
 /// Tab Armada: driver melihat kartu Mobil Saya di atas, lalu papan armada area; panitia/koordinator melihat semua.
@@ -48,7 +79,9 @@ class FleetScreen extends StatefulWidget {
 }
 
 class _FleetScreenState extends State<FleetScreen> {
+  late final Stream<FleetData> _fleet = watchFleet();
   String? leg; // null = otomatis (pergi dulu, pulang setelah semua mobil tiba)
+  bool forcePulang = false; // koordinator membuka leg Pulang walau ada mobil yang belum lapor Tiba
   String area = '';
   String filter = 'semua';
 
@@ -60,10 +93,10 @@ class _FleetScreenState extends State<FleetScreen> {
     final me = h.me;
     if (me.isDriver && me.car.isNotEmpty) return MyCarScreen(car: me.car, embedded: true);
     return StreamBuilder<FleetData>(
-      stream: watchFleet(),
+      stream: _fleet,
       builder: (context, snap) {
         final d = snap.data ?? FleetData(const {}, const {});
-        final allPergiDone = cars.isNotEmpty && cars.keys.every((k) => Hub.legDone.contains(d.status(k, 'pergi')?['st']));
+        final allPergiDone = forcePulang || (cars.isNotEmpty && cars.keys.every((k) => Hub.legDone.contains(d.status(k, 'pergi')?['st'])));
         final leg = allPergiDone ? (this.leg ?? 'pulang') : 'pergi';
         var list = cars.entries.toList()..sort((a, b) => (int.tryParse(a.key) ?? 999).compareTo(int.tryParse(b.key) ?? 999));
         if (me.isDriver && me.area.isNotEmpty) list = list.where((e) => e.value.area == me.area).toList();
@@ -128,7 +161,22 @@ class _FleetScreenState extends State<FleetScreen> {
               if (!allPergiDone)
                 Padding(
                   padding: const EdgeInsets.only(top: 6),
-                  child: Text('Pulang terbuka setelah semua mobil lapor Tiba.', style: TextStyle(fontSize: 12.5, color: c.muted)),
+                  child: Row(children: [
+                    Expanded(child: Text('Pulang terbuka setelah semua mobil lapor Tiba.', style: TextStyle(fontSize: 12.5, color: c.muted))),
+                    if (me.isKoord)
+                      TextButton(
+                        onPressed: () async {
+                          if (await confirm(context,
+                              title: 'Buka leg Pulang sekarang?', text: 'Masih ada mobil yang belum lapor Tiba. Papan pindah ke leg Pulang.', action: 'Buka Pulang')) {
+                            setState(() {
+                              forcePulang = true;
+                              this.leg = 'pulang';
+                            });
+                          }
+                        },
+                        child: const Text('Buka sekarang'),
+                      ),
+                  ]),
                 ),
             ]),
           ),
@@ -236,14 +284,17 @@ class MyCarScreen extends StatefulWidget {
 }
 
 class _MyCarScreenState extends State<MyCarScreen> {
+  late final Stream<FleetData> _fleet = watchFleet();
   String? leg; // null = otomatis: pergi dulu, pulang setelah pergi Tiba/Selesai
+  bool forcePulang = false; // koordinator membuka leg Pulang mobil ini
+  String? day; // konser multi-hari: hari yang manifest-nya ditampilkan
   String? undoFrom;
   int undoUntil = 0;
 
   bool get canEdit => Hub.i.me.isKoord || Hub.i.me.cars.contains(widget.car) || Hub.i.me.car == widget.car;
 
   /// Leg yang sedang dilihat: pulang hanya kalau pergi mobil ini sudah Tiba/Selesai.
-  String _leg() => Hub.i.pergiDone(widget.car) ? (leg ?? 'pulang') : 'pergi';
+  String _leg() => Hub.i.pergiDone(widget.car) || forcePulang ? (leg ?? 'pulang') : 'pergi';
 
   Future<void> _set(String status, {String note = ''}) async {
     final leg = _leg();
@@ -291,16 +342,22 @@ class _MyCarScreenState extends State<MyCarScreen> {
     final driver = h.concert!.carsMap[widget.car];
     final manifestOn = h.concert!.manifestEnabled;
     final body = StreamBuilder<FleetData>(
-        stream: watchFleet(),
+        stream: _fleet,
         builder: (context, snap) {
           final d = snap.data ?? FleetData(const {}, const {});
-          final pulangOpen = Hub.legDone.contains(d.status(widget.car, 'pergi')?['st']);
+          final pulangOpen = forcePulang || Hub.legDone.contains(d.status(widget.car, 'pergi')?['st']);
+          final days = {for (final r in h.concert!.manifest.where((r) => r.car == widget.car)) r.hari}.where((x) => x.isNotEmpty).toList()..sort();
+          final today = Hub.concertDay(); // lewat tengah malam (sebelum 06.00) tetap hari konser kemarin
+          final dayNow = day ?? (days.contains(today) ? today : (days.isEmpty ? '' : days.first));
           final leg = pulangOpen ? (this.leg ?? 'pulang') : 'pergi';
           final s = d.status(widget.car, leg);
           final st = s?['st'] as String?;
           final idx = st == null ? -1 : fleetSteps.indexOf(st);
           final next = st == 'kendala' ? (s?['prev'] as String? ?? 'siap') : (idx + 1 < fleetSteps.length ? fleetSteps[idx + 1] : null);
-          final rows = h.concert!.manifest.where((r) => r.car == widget.car && r.hasLeg(leg)).toList()..sort((a, b) => a.jam.compareTo(b.jam));
+          final rows = h.concert!.manifest
+              .where((r) => r.car == widget.car && r.hasLeg(leg) && (days.length < 2 || r.hari.isEmpty || r.hari == dayNow))
+              .toList()
+            ..sort((a, b) => a.jam.compareTo(b.jam));
           final pax = rows.fold<int>(0, (a, r) => a + r.pax);
           final naik = rows.where((r) => d.checkin(r, leg) == 'naik').fold<int>(0, (a, r) => a + r.pax);
           return ListView(padding: const EdgeInsets.fromLTRB(16, 16, 16, 40), children: [
@@ -337,8 +394,29 @@ class _MyCarScreenState extends State<MyCarScreen> {
             if (!pulangOpen)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
-                child: Text('Pulang terbuka setelah perjalanan pergi ditandai Tiba.', style: TextStyle(fontSize: 12.5, color: c.muted)),
+                child: Row(children: [
+                  Expanded(child: Text('Pulang terbuka setelah perjalanan pergi ditandai Tiba.', style: TextStyle(fontSize: 12.5, color: c.muted))),
+                  if (h.me.isKoord)
+                    TextButton(onPressed: () => setState(() => forcePulang = true), child: const Text('Buka sekarang')),
+                ]),
               ),
+            if (days.length > 1) ...[
+              const SizedBox(height: 12),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(children: [
+                  for (var i = 0; i < days.length; i++)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ChoiceChip(
+                        label: Text('Hari ${i + 1} · ${_shortDate(days[i])}'),
+                        selected: dayNow == days[i],
+                        onSelected: (_) => setState(() => day = days[i]),
+                      ),
+                    ),
+                ]),
+              ),
+            ],
             const SizedBox(height: 18),
             _Stepper(current: st),
             if (st == 'kendala') ...[
@@ -390,6 +468,13 @@ class _MyCarScreenState extends State<MyCarScreen> {
     if (widget.embedded) return body;
     return Scaffold(appBar: AppBar(title: Text('Mobil ${carName(widget.car)}')), body: body);
   }
+}
+
+/// "2026-09-27" -> "27 Sep"
+String _shortDate(String iso) {
+  const m = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+  final d = DateTime.tryParse(iso);
+  return d == null ? iso : '${d.day} ${m[d.month - 1]}';
 }
 
 class _Stepper extends StatelessWidget {
