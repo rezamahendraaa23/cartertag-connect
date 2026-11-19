@@ -10,8 +10,11 @@ class Notifier {
 
   final _p = FlutterLocalNotificationsPlugin();
   bool _ready = false;
-  int _seq = 100;
   static const sosId = 7;
+
+  /// Satu notifikasi per tujuan (mis. per chat): notifikasi berikutnya menggantikan, tidak menumpuk.
+  /// Rumus sama dengan handler FCM latar (main.dart) supaya pesan yang datang lewat dua jalur tidak dobel.
+  static int notifId(String? route) => 1000 + ((route ?? 'umum').codeUnits.fold<int>(7, (a, b) => (a * 31 + b) & 0x3fffffff) % 900000);
 
   static const _msg = AndroidNotificationChannel('ct_msg', 'Pesan', description: 'Chat grup & pribadi', importance: Importance.high);
   static const _imp = AndroidNotificationChannel('ct_important', 'Pengumuman & absen', description: 'Pengumuman koordinator dan absen', importance: Importance.max);
@@ -46,7 +49,7 @@ class Notifier {
     if (!_ready) return;
     final ch = important ? _imp : _msg;
     await _p.show(
-      id: _seq++,
+      id: notifId(route),
       title: title,
       body: body,
       payload: route,

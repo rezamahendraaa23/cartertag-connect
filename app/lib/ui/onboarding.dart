@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../core/ids.dart';
 import '../core/theme.dart';
@@ -191,7 +192,13 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
 
 /// S04 — Gabung: nama + kode (+ nomor mobil untuk driver).
 class JoinScreen extends StatefulWidget {
-  const JoinScreen({super.key});
+  const JoinScreen({super.key, this.initialCode, this.auto = false});
+
+  /// Kode dari link gabung / QR (boleh dengan atau tanpa "CT-").
+  final String? initialCode;
+
+  /// true = langsung gabung (tanya nama kalau belum ada, tanya nomor mobil kalau kode driver).
+  final bool auto;
   @override
   State<JoinScreen> createState() => _JoinScreenState();
 }
@@ -217,10 +224,22 @@ class _JoinScreenState extends State<JoinScreen> {
       server.text = u;
       if (u.isEmpty) setState(() => showServer = true);
     });
+    // nama & nomor HP tersimpan dari gabung sebelumnya
+    final init = (widget.initialCode ?? '').toUpperCase().replaceFirst(RegExp(r'^CT-?'), '').replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    if (init.length == 6) code.text = init;
+    Future.wait([Hub.i.s.get<String>('profile_name'), Hub.i.s.get<String>('profile_hp')]).then((v) async {
+      if (name.text.isEmpty) name.text = v[0] ?? '';
+      if (hp.text.isEmpty) hp.text = v[1] ?? '';
+      if (!widget.auto || code.text.length != 6 || !mounted) return;
+      await WidgetsBinding.instance.endOfFrame;
+      if (name.text.trim().isEmpty && !await _askProfile()) return;
+      if (mounted) await _submit(fromScan: true);
+    });
   }
 
-  Future<void> _submit() async {
-    if (!_form.currentState!.validate()) return;
+  /// Gabung. Kode driver tanpa nomor mobil -> server menolak dengan kode 'car' -> popup nomor mobil -> coba lagi.
+  Future<void> _submit({bool fromScan = false}) async {
+    if (!fromScan && !_form.currentState!.validate()) return;
     setState(() {
       busy = true;
       error = null;
@@ -228,18 +247,27 @@ class _JoinScreenState extends State<JoinScreen> {
     });
     try {
       if (showServer) await Api.setBaseUrl(server.text);
-      final c = await Hub.i.join(kode: code.text, nama: name.text.trim(), car: car.text, hp: hp.text);
+      final c = await Hub.i.join(kode: code.text, nama: name.text.trim(), car: carDigits(car.text), hp: hp.text);
       if (!mounted) return;
       Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => ConfirmScreen(concert: c)), (_) => false);
     } on ApiError catch (e) {
+      if (e.code == 'car') {
+        setState(() => busy = false);
+        final n = await _askCar();
+        if (n != null && mounted) {
+          car.text = n;
+          return _submit(fromScan: true);
+        }
+        setState(() {
+          needCar = true;
+          error = 'Kode ini untuk driver: isi nomor mobil.';
+        });
+        return;
+      }
       setState(() {
         error = e.message;
         offline = e.isNetwork;
         if (e.code == 'config') showServer = true;
-        if (e.code == 'car') {
-          needCar = true;
-          WidgetsBinding.instance.addPostFrameCallback((_) => carFocus.requestFocus());
-        }
       });
     } catch (e) {
       setState(() => error = 'Gagal gabung: $e');
@@ -248,13 +276,77 @@ class _JoinScreenState extends State<JoinScreen> {
     }
   }
 
-  /// Scan QR: QR kode dari admin mengisi kolom Kode; QR undangan langsung membuka alur gabung offline.
+  /// Popup "Nomor mobil berapa?" dengan awalan C (tinggal ketik angka).
+  Future<String?> _askCar() {
+    final ctl = TextEditingController(text: carDigits(car.text));
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Nomor mobil berapa?'),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(4)],
+          style: mono(22, w: FontWeight.w700),
+          decoration: const InputDecoration(prefixText: 'C ', hintText: '3'),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim().isEmpty ? null : v.trim()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Batal')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, ctl.text.trim().isEmpty ? null : ctl.text.trim()), child: const Text('Masuk')),
+        ],
+      ),
+    );
+  }
+
+  /// Popup nama (+ HP opsional) untuk gabung pertama lewat scan.
+  Future<bool> _askProfile() async {
+    final n = TextEditingController(text: name.text), h = TextEditingController(text: hp.text);
+    final key = GlobalKey<FormState>();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Nama kamu'),
+        content: Form(
+          key: key,
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextFormField(
+              controller: n,
+              autofocus: true,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(labelText: 'Nama', prefixIcon: Icon(LucideIcons.user)),
+              validator: (v) => (v ?? '').trim().isEmpty ? 'Nama wajib diisi' : null,
+            ),
+            const SizedBox(height: 12),
+            TextFormField(
+              controller: h,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(labelText: 'Nomor HP (opsional)', prefixIcon: Icon(LucideIcons.phone)),
+              validator: (v) => (v ?? '').trim().isNotEmpty && normHp(v!).isEmpty ? 'Nomor HP tidak valid' : null,
+            ),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Batal')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, key.currentState!.validate()), child: const Text('Lanjut')),
+        ],
+      ),
+    );
+    if (ok != true) return false;
+    name.text = n.text.trim();
+    hp.text = h.text.trim();
+    return true;
+  }
+
+  /// Scan QR: QR kode dari admin -> langsung gabung (driver ditanya nomor mobil); QR undangan -> alur gabung offline.
   Future<void> _scan() async {
     final r = await Navigator.of(context).push<String>(MaterialPageRoute(builder: (_) => const InviteScanScreen()));
-    if (r != null && mounted) {
-      setState(() => code.text = r);
-      toast(context, 'Kode $r terisi. Lengkapi nama lalu Gabung.');
-    }
+    if (r == null || !mounted) return;
+    setState(() => code.text = r.toUpperCase().replaceFirst(RegExp(r'^CT-?'), ''));
+    if (name.text.trim().isEmpty && !await _askProfile()) return;
+    if (!mounted) return;
+    await _submit(fromScan: true);
   }
 
   @override
@@ -267,8 +359,32 @@ class _JoinScreenState extends State<JoinScreen> {
         child: Form(
           key: _form,
           child: ListView(padding: const EdgeInsets.fromLTRB(20, 8, 20, 24), children: [
-            Text('Minta kode ke koordinator. Isi sekali saat masih ada internet.', style: t.bodyLarge?.copyWith(color: c.muted)),
-            const SizedBox(height: 24),
+            if (!kIsWeb) ...[
+              FilledButton.icon(
+                onPressed: busy ? null : _scan,
+                icon: const Icon(LucideIcons.scanLine),
+                label: const Text('Scan QR kode dari koordinator'),
+              ),
+              const SizedBox(height: 18),
+              Row(children: [
+                const Expanded(child: Divider()),
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Text('atau isi manual', style: t.bodySmall)),
+                const Expanded(child: Divider()),
+              ]),
+              const SizedBox(height: 18),
+            ] else ...[
+              InfoBanner(
+                margin: EdgeInsets.zero,
+                tone: Tone.info,
+                icon: LucideIcons.smartphone,
+                text: 'Pakai HP Android? Pasang app-nya supaya tetap bisa chat tanpa sinyal.',
+                action: 'Unduh',
+                onAction: () => launchUrl(Uri.parse('https://github.com/rezamahendraaa23/cartertag-connect/releases/latest'), mode: LaunchMode.externalApplication),
+              ),
+              const SizedBox(height: 16),
+              Text('Minta kode ke koordinator. Isi sekali saat masih ada internet.', style: t.bodyLarge?.copyWith(color: c.muted)),
+              const SizedBox(height: 20),
+            ],
             TextFormField(
               controller: name,
               enabled: !busy,
@@ -285,28 +401,25 @@ class _JoinScreenState extends State<JoinScreen> {
               textCapitalization: TextCapitalization.characters,
               textInputAction: TextInputAction.next,
               style: mono(18, w: FontWeight.w700),
-              inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9-]')), LengthLimitingTextInputFormatter(9)],
-              decoration: InputDecoration(
-                labelText: 'Kode',
-                hintText: 'CT-XXXXXX',
-                prefixIcon: const Icon(LucideIcons.keyRound),
-                suffixIcon: kIsWeb
-                    ? null
-                    : IconButton(tooltip: 'Scan QR kode', icon: const Icon(LucideIcons.scanLine), onPressed: busy ? null : _scan),
-              ),
-              validator: (v) => (v ?? '').toUpperCase().replaceAll(RegExp(r'^CT-?'), '').replaceAll('-', '').length != 6 ? 'Kode terdiri dari 6 karakter' : null,
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
+                LengthLimitingTextInputFormatter(6),
+                TextInputFormatter.withFunction((o, n) => n.copyWith(text: n.text.toUpperCase())),
+              ],
+              decoration: InputDecoration(labelText: 'Kode', prefixText: 'CT-', hintText: 'XXXXXX', prefixIcon: const Icon(LucideIcons.keyRound)),
+              validator: (v) => (v ?? '').length != 6 ? 'Kode terdiri dari 6 karakter' : null,
             ),
             const SizedBox(height: 14),
             TextFormField(
               controller: car,
               focusNode: carFocus,
               enabled: !busy,
-              keyboardType: TextInputType.text,
-              textCapitalization: TextCapitalization.characters,
-              inputFormatters: [LengthLimitingTextInputFormatter(10)],
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(4)],
               decoration: InputDecoration(
                 labelText: needCar ? 'Nomor mobil (wajib untuk driver)' : 'Nomor mobil (khusus driver)',
-                hintText: 'mis. 3',
+                prefixText: 'C ',
+                hintText: '3',
                 prefixIcon: const Icon(LucideIcons.carFront),
               ),
             ),
@@ -336,13 +449,6 @@ class _JoinScreenState extends State<JoinScreen> {
             ],
             const SizedBox(height: 24),
             FilledButton(onPressed: busy ? null : _submit, child: Text(busy ? 'Menghubungkan…' : 'Gabung')),
-            const SizedBox(height: 8),
-            if (!kIsWeb)
-              TextButton.icon(
-                onPressed: busy ? null : _scan,
-                icon: const Icon(LucideIcons.scanLine, size: 20),
-                label: const Text('Scan QR kode / undangan'),
-              ),
           ]),
         ),
       ),
@@ -416,6 +522,12 @@ class _InviteScanScreenState extends State<InviteScanScreen> {
   bool _done = false;
 
   @override
+  void initState() {
+    super.initState();
+    Hub.i.s.get<String>('profile_name').then((v) => name.text = name.text.isEmpty ? (v ?? '') : name.text);
+  }
+
+  @override
   void dispose() {
     _ctl.dispose();
     super.dispose();
@@ -426,8 +538,10 @@ class _InviteScanScreenState extends State<InviteScanScreen> {
     for (final b in cap.barcodes) {
       final raw = (b.rawValue ?? '').trim();
       if (raw.isEmpty) continue;
-      // QR kode dari admin: "CT-XXXXXX" -> kembali ke form Gabung dengan kode terisi
-      final m = RegExp(r'^(?:CT-?)?([2-9A-HJ-NP-Z]{6})$', caseSensitive: false).firstMatch(raw);
+      // QR kode dari admin: "CT-XXXXXX" atau link ".../join?kode=CT-XXXXXX" -> kembali ke form Gabung dengan kode terisi
+      final link = Uri.tryParse(raw);
+      final fromLink = link != null && link.path.startsWith('/join') ? (link.queryParameters['kode'] ?? link.queryParameters['k'] ?? '') : raw;
+      final m = RegExp(r'^(?:CT-?)?([2-9A-HJ-NP-Z]{6})$', caseSensitive: false).firstMatch(fromLink.trim());
       if (m != null) {
         _done = true;
         HapticFeedback.mediumImpact();
@@ -455,7 +569,7 @@ class _InviteScanScreenState extends State<InviteScanScreen> {
   Future<void> _join() async {
     if (!_form.currentState!.validate()) return;
     setState(() => busy = true);
-    final c = await Hub.i.joinFromInvite(qr!, nama: name.text.trim(), car: car.text);
+    final c = await Hub.i.joinFromInvite(qr!, nama: name.text.trim(), car: carDigits(car.text));
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => ConfirmScreen(concert: c)), (_) => false);
   }
@@ -500,7 +614,9 @@ class _InviteScanScreenState extends State<InviteScanScreen> {
                     TextFormField(
                       controller: car,
                       textCapitalization: TextCapitalization.characters,
-                      decoration: const InputDecoration(labelText: 'Nomor mobil', prefixIcon: Icon(LucideIcons.carFront)),
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(4)],
+                      decoration: const InputDecoration(labelText: 'Nomor mobil', prefixText: 'C ', prefixIcon: Icon(LucideIcons.carFront)),
                       validator: (v) => (v ?? '').trim().isEmpty ? 'Nomor mobil wajib diisi' : null,
                     ),
                   ],

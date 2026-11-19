@@ -313,7 +313,7 @@ function connectJoin_(b) {
   var found = connectFindByCode_(code);
   if (!found) { hit(); throw connectError_('kode', 'Kode tidak ditemukan. Cek lagi ke koordinator.'); }
   var k = found.k, role = found.role;
-  var car = cap_(b.car, 10).replace(/^mobil\s*/i, '');
+  var car = cap_(b.car, 10).replace(/^(mobil|m|c)\s*/i, '').trim();   // "C3" / "mobil 3" -> "3" (sama dengan kolom No di Plotingan)
   if (role === 'driver' && !car) throw connectError_('car', 'Kamu pakai kode driver: isi nomor mobil kamu.');
   _konser = k; _ss = null;
   var cfg = connectCfg_(k);

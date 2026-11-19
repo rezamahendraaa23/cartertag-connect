@@ -10,6 +10,8 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'core/theme.dart';
 import 'data/store.dart';
 import 'services/hub.dart';
+import 'services/notifier.dart';
+import 'ui/onboarding.dart';
 import 'ui/root.dart';
 
 /// Push FCM saat app tertutup: hanya metadata (isi pesan terenkripsi), tampilkan notifikasi ringkas.
@@ -27,7 +29,8 @@ Future<void> _fcmBackground(RemoteMessage m) async {
     _ => (from, 'Pesan baru'),
   };
   await p.show(
-    id: DateTime.now().millisecondsSinceEpoch ~/ 1000 % 100000,
+    // ID sama dengan notifikasi dari app (Notifier.notifId) supaya pesan yang juga masuk lewat jalur realtime tidak dobel
+    id: kind == 'sos' ? Notifier.sosId : Notifier.notifId(kind == 'msg' ? 'chat:${d['ch'] ?? 'g'}' : 'info'),
     title: title,
     body: body,
     payload: kind == 'sos' ? 'sos' : (kind == 'msg' ? 'chat:${d['ch'] ?? 'g'}' : 'info'),
@@ -80,14 +83,40 @@ class _ConnectAppState extends State<ConnectApp> {
     themeMode.addListener(() => setState(() => mode = themeMode.value));
     textScale.addListener(() => setState(() {}));
     Store.i.get<double>('text_scale').then((v) => textScale.value = v ?? 1.0);
-    const MethodChannel('ct/route').setMethodCallHandler((call) async {
+    const route = MethodChannel('ct/route');
+    route.setMethodCallHandler((call) async {
       if (call.method == 'open') Hub.i.pendingRoute.value = '${call.arguments}';
     });
+    Hub.i.pendingRoute.addListener(_onRoute);
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (kIsWeb) {
+        // halaman web dibuka dari link gabung: https://cartertag-connect.web.app/join?kode=CT-XXXXXX
+        final u = Uri.base;
+        if (u.path.startsWith('/join')) Hub.i.pendingRoute.value = 'join:${u.queryParameters['kode'] ?? u.queryParameters['k'] ?? ''}';
+      } else {
+        try {
+          final r = await route.invokeMethod<String>('initial');
+          if (r != null) Hub.i.pendingRoute.value = r;
+        } catch (_) {}
+      }
+    });
+  }
+
+  /// Link gabung "join:CT-XXXXXX": buka form Gabung dengan kode terisi dan langsung jalan (seperti scan QR).
+  void _onRoute() {
+    final r = Hub.i.pendingRoute.value;
+    if (r == null || !r.startsWith('join:')) return;
+    Hub.i.pendingRoute.value = null;
+    final code = r.substring(5);
+    final ctx = navKey.currentContext;
+    if (ctx == null) return;
+    openPermissionsThen(ctx, JoinScreen(initialCode: code, auto: code.isNotEmpty));
   }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: navKey,
       title: 'CarterTag Connect',
       debugShowCheckedModeBanner: false,
       theme: buildTheme(Brightness.light),
@@ -103,4 +132,5 @@ class _ConnectAppState extends State<ConnectApp> {
 }
 
 final themeMode = ValueNotifier<ThemeMode>(ThemeMode.system);
+final navKey = GlobalKey<NavigatorState>();
 final textScale = ValueNotifier<double>(1.0);

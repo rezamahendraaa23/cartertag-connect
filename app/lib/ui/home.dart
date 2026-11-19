@@ -59,7 +59,7 @@ class _HomeShellState extends State<HomeShell> {
 
   void _route() {
     final r = Hub.i.pendingRoute.value;
-    if (r == null || !mounted) return;
+    if (r == null || r.startsWith('join:') || !mounted) return; // link gabung ditangani ConnectApp
     Hub.i.pendingRoute.value = null;
     if (r.startsWith('chat:')) {
       setState(() => tab = 0);

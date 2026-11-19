@@ -58,6 +58,13 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- Link gabung dari admin: https://cartertag-connect.web.app/join?kode=CT-XXXXXX langsung membuka app (App Links) -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="cartertag-connect.web.app" android:pathPrefix="/join" />
+            </intent-filter>
         </activity>
 
         <service

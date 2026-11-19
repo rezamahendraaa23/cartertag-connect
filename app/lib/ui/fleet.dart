@@ -48,7 +48,7 @@ class FleetScreen extends StatefulWidget {
 }
 
 class _FleetScreenState extends State<FleetScreen> {
-  String leg = Hub.i.currentLeg();
+  String? leg; // null = otomatis (pergi dulu, pulang setelah semua mobil tiba)
   String area = '';
   String filter = 'semua';
 
@@ -58,10 +58,13 @@ class _FleetScreenState extends State<FleetScreen> {
     final c = CT.of(context);
     final cars = h.concert!.carsMap;
     final me = h.me;
+    if (me.isDriver && me.car.isNotEmpty) return MyCarScreen(car: me.car, embedded: true);
     return StreamBuilder<FleetData>(
       stream: watchFleet(),
       builder: (context, snap) {
         final d = snap.data ?? FleetData(const {}, const {});
+        final allPergiDone = cars.isNotEmpty && cars.keys.every((k) => Hub.legDone.contains(d.status(k, 'pergi')?['st']));
+        final leg = allPergiDone ? (this.leg ?? 'pulang') : 'pergi';
         var list = cars.entries.toList()..sort((a, b) => (int.tryParse(a.key) ?? 999).compareTo(int.tryParse(b.key) ?? 999));
         if (me.isDriver && me.area.isNotEmpty) list = list.where((e) => e.value.area == me.area).toList();
         if (area.isNotEmpty) list = list.where((e) => e.value.area == area).toList();
@@ -102,7 +105,7 @@ class _FleetScreenState extends State<FleetScreen> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text('Mobil Saya · ${me.car}', style: Theme.of(context).textTheme.titleMedium),
+                      Text('Mobil Saya · ${me.carLabel}', style: Theme.of(context).textTheme.titleMedium),
                       Text('Lapor status & centang penumpang', style: Theme.of(context).textTheme.bodyMedium),
                     ]),
                   ),
@@ -113,14 +116,21 @@ class _FleetScreenState extends State<FleetScreen> {
             ),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-            child: SegmentedButton<String>(
-              segments: const [
-                ButtonSegment(value: 'pergi', label: Text('Pergi'), icon: Icon(LucideIcons.arrowUp)),
-                ButtonSegment(value: 'pulang', label: Text('Pulang'), icon: Icon(LucideIcons.refreshCw)),
-              ],
-              selected: {leg},
-              onSelectionChanged: (s) => setState(() => leg = s.first),
-            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              SegmentedButton<String>(
+                segments: [
+                  const ButtonSegment(value: 'pergi', label: Text('Pergi'), icon: Icon(LucideIcons.arrowUp)),
+                  ButtonSegment(value: 'pulang', label: const Text('Pulang'), icon: Icon(allPergiDone ? LucideIcons.refreshCw : LucideIcons.lock), enabled: allPergiDone),
+                ],
+                selected: {leg},
+                onSelectionChanged: (s) => setState(() => this.leg = s.first),
+              ),
+              if (!allPergiDone)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text('Pulang terbuka setelah semua mobil lapor Tiba.', style: TextStyle(fontSize: 12.5, color: c.muted)),
+                ),
+            ]),
           ),
           SizedBox(
             height: 128,
@@ -181,11 +191,11 @@ class _CarCard extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
       child: PressBox(
-        semantics: 'Mobil $car, ${driver.name}',
+        semantics: '${carName(car)}, ${driver.name}',
         onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => MyCarScreen(car: car))),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            Text(car, style: mono(26, w: FontWeight.w700)),
+            Text(carName(car), style: mono(24, w: FontWeight.w700)),
             const SizedBox(width: 10),
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -216,20 +226,27 @@ class _CarCard extends StatelessWidget {
 
 /// S14 — Mobil Saya: status perjalanan + manifest + check-in.
 class MyCarScreen extends StatefulWidget {
-  const MyCarScreen({super.key, required this.car});
+  const MyCarScreen({super.key, required this.car, this.embedded = false});
   final String car;
+
+  /// true = tampil langsung di tab Armada (driver), tanpa app bar sendiri.
+  final bool embedded;
   @override
   State<MyCarScreen> createState() => _MyCarScreenState();
 }
 
 class _MyCarScreenState extends State<MyCarScreen> {
-  late String leg = Hub.i.currentLeg();
+  String? leg; // null = otomatis: pergi dulu, pulang setelah pergi Tiba/Selesai
   String? undoFrom;
   int undoUntil = 0;
 
   bool get canEdit => Hub.i.me.isKoord || Hub.i.me.cars.contains(widget.car) || Hub.i.me.car == widget.car;
 
+  /// Leg yang sedang dilihat: pulang hanya kalau pergi mobil ini sudah Tiba/Selesai.
+  String _leg() => Hub.i.pergiDone(widget.car) ? (leg ?? 'pulang') : 'pergi';
+
   Future<void> _set(String status, {String note = ''}) async {
+    final leg = _leg();
     final prev = (await Hub.i.s.fleet.record('${Hub.i.slug}|${widget.car}|$leg').get(Hub.i.s.db))?['st'] as String?;
     await Hub.i.sendFleet(widget.car, leg, status, note: note);
     setState(() {
@@ -244,7 +261,7 @@ class _MyCarScreenState extends State<MyCarScreen> {
     if (undoFrom == null || DateTime.now().millisecondsSinceEpoch > undoUntil) return;
     final to = undoFrom!;
     undoFrom = null;
-    await Hub.i.sendFleet(widget.car, leg, to, note: 'koreksi');
+    await Hub.i.sendFleet(widget.car, _leg(), to, note: 'koreksi');
     if (mounted) setState(() {});
   }
 
@@ -273,12 +290,12 @@ class _MyCarScreenState extends State<MyCarScreen> {
     final c = CT.of(context);
     final driver = h.concert!.carsMap[widget.car];
     final manifestOn = h.concert!.manifestEnabled;
-    return Scaffold(
-      appBar: AppBar(title: Text('Mobil ${widget.car}')),
-      body: StreamBuilder<FleetData>(
+    final body = StreamBuilder<FleetData>(
         stream: watchFleet(),
         builder: (context, snap) {
           final d = snap.data ?? FleetData(const {}, const {});
+          final pulangOpen = Hub.legDone.contains(d.status(widget.car, 'pergi')?['st']);
+          final leg = pulangOpen ? (this.leg ?? 'pulang') : 'pergi';
           final s = d.status(widget.car, leg);
           final st = s?['st'] as String?;
           final idx = st == null ? -1 : fleetSteps.indexOf(st);
@@ -291,7 +308,7 @@ class _MyCarScreenState extends State<MyCarScreen> {
               padding: const EdgeInsets.all(16),
               decoration: brutalBox(context, color: c.accentBg),
               child: Row(children: [
-                Text(widget.car, style: mono(34, w: FontWeight.w700)),
+                Text(carName(widget.car), style: mono(32, w: FontWeight.w700)),
                 const SizedBox(width: 14),
                 Expanded(
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -310,13 +327,18 @@ class _MyCarScreenState extends State<MyCarScreen> {
             ),
             const SizedBox(height: 14),
             SegmentedButton<String>(
-              segments: const [ButtonSegment(value: 'pergi', label: Text('Leg Pergi')), ButtonSegment(value: 'pulang', label: Text('Leg Pulang'))],
+              segments: [
+                const ButtonSegment(value: 'pergi', label: Text('Pergi'), icon: Icon(LucideIcons.arrowUp)),
+                ButtonSegment(value: 'pulang', label: const Text('Pulang'), icon: Icon(pulangOpen ? LucideIcons.refreshCw : LucideIcons.lock), enabled: pulangOpen),
+              ],
               selected: {leg},
-              onSelectionChanged: (v) => setState(() {
-                leg = v.first;
-                h.legOverride = leg;
-              }),
+              onSelectionChanged: (v) => setState(() => this.leg = v.first),
             ),
+            if (!pulangOpen)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text('Pulang terbuka setelah perjalanan pergi ditandai Tiba.', style: TextStyle(fontSize: 12.5, color: c.muted)),
+              ),
             const SizedBox(height: 18),
             _Stepper(current: st),
             if (st == 'kendala') ...[
@@ -364,8 +386,9 @@ class _MyCarScreenState extends State<MyCarScreen> {
             ],
           ]);
         },
-      ),
-    );
+      );
+    if (widget.embedded) return body;
+    return Scaffold(appBar: AppBar(title: Text('Mobil ${carName(widget.car)}')), body: body);
   }
 }
 
@@ -493,7 +516,7 @@ class PassengerScreen extends StatelessWidget {
         _row(context, LucideIcons.mapPin, 'Area', r.area.isEmpty ? '-' : r.area),
         _row(context, LucideIcons.mapPinned, 'Titik kumpul', r.titik.isEmpty ? '-' : r.titik),
         _row(context, LucideIcons.clock, 'Jam jemput', r.jam.isEmpty ? '-' : r.jam),
-        _row(context, LucideIcons.carFront, 'Mobil', r.car),
+        _row(context, LucideIcons.carFront, 'Mobil', carName(r.car)),
         if (r.catatan.isNotEmpty) _row(context, LucideIcons.info, 'Catatan', r.catatan),
         const SizedBox(height: 20),
         if (canContact) ...[

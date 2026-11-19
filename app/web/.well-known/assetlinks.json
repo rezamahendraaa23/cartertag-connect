@@ -1,0 +1,10 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "id.cartertag.connect",
+      "sha256_cert_fingerprints": ["D2:C4:06:BA:13:F5:21:9C:4C:B5:2A:FF:18:33:DF:E8:7A:F9:7E:BD:08:1F:5B:A4:B5:3E:98:EA:04:52:94:77"]
+    }
+  }
+]

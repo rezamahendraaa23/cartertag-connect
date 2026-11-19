@@ -87,8 +87,15 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
         if (c == null) { stopSelf(); return START_NOT_STICKY }
         MeshBus.saveConfig(this, c)
         val n = foregroundNotification(c)
-        if (Build.VERSION.SDK_INT >= 34) startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
-        else startForeground(NOTIF_ID, n)
+        try {
+            if (Build.VERSION.SDK_INT >= 34) startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            else startForeground(NOTIF_ID, n)
+        } catch (e: Exception) {
+            // izin Bluetooth dicabut / dilarang start dari latar: berhenti rapi, app tetap jalan lewat internet
+            Log.w(BleMesh.TAG, "startForeground ditolak: $e")
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (cfg?.cid != c.cid) {
             ble.stop()
             cfg = c

@@ -12,6 +12,7 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         if (MeshBus.loadConfig(context) == null) return
+        if (!hasBluetoothPermission(context)) return
         val i = Intent(context, MeshService::class.java)
         try {
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)

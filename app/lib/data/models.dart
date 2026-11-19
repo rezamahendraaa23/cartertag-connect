@@ -20,8 +20,24 @@ class Member {
   bool get isKoord => role == 'koordinator';
   bool get joined => pubEd.isNotEmpty;
 
+  /// Label untuk tag di grup: driver = "Mobil 3", lainnya = nama.
+  String get tagLabel => isDriver && car.isNotEmpty ? carLabel : name;
+
+  /// Nomor mobil untuk ditampilkan: "3" -> "C3" (yang sudah berhuruf dibiarkan).
+  String get carLabel => carName(car);
+
+  /// Cocok dengan pencarian nama atau nomor mobil ("3", "mobil 3", "m3").
+  bool matches(String query) {
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) return true;
+    final carQ = q.replaceFirst(RegExp(r'^(mobil|m|c)\s*'), '');
+    if (car.isNotEmpty && carQ.isNotEmpty && car.toLowerCase().startsWith(carQ)) return true;
+    final pq = q.replaceAll(' ', '');
+    return name.toLowerCase().contains(q) || (pq.length >= 3 && plat.toLowerCase().replaceAll(' ', '').contains(pq));
+  }
+
   String get roleLabel => switch (role) {
-        'driver' => car.isNotEmpty ? 'Driver $car' : 'Driver',
+        'driver' => car.isNotEmpty ? 'Driver ${carName(car)}' : 'Driver',
         'koordinator' => 'Koordinator',
         _ => 'Panitia',
       };
@@ -33,6 +49,16 @@ class Member {
     return (parts[0][0] + parts[1][0]).toUpperCase();
   }
 }
+
+/// "3" -> "C3"; "C3"/"c3" -> "C3"; kosong tetap kosong.
+String carName(String car) {
+  final c = car.trim();
+  if (c.isEmpty) return '';
+  return RegExp(r'^[A-Za-z]').hasMatch(c) ? c.toUpperCase() : 'C$c';
+}
+
+/// Angka saja dari input nomor mobil ("C3" / "c 3" / "3" -> "3"), cocok dengan kolom No di Plotingan.
+String carDigits(String input) => input.trim().replaceFirst(RegExp(r'^(mobil|m|c)\s*', caseSensitive: false), '').trim();
 
 class ManifestRow {
   ManifestRow(this.m);

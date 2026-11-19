@@ -70,11 +70,26 @@ function tlFbWarn() {
 }
 
 /* ---- C01 Pengaturan: cukup bagikan 2 kode */
+var TL_JOIN_BASE = 'https://cartertag-connect.web.app/join?kode=';
+/** Link gabung: diklik di HP Android yang sudah pasang app -> app terbuka & langsung gabung; selain itu terbuka di web. */
+function tlJoinLink(code) { return TL_JOIN_BASE + 'CT-' + code; }
+function tlShareText(label, code) {
+    var k = findKonser(TL.slug), nama = k ? k.name : 'konser';
+    var siapa = label.indexOf('Driver') !== -1 ? 'driver' : 'koordinator';
+    return 'Gabung tim CarterTag Connect (' + siapa + ') - ' + nama + '\n\nKlik link ini:\n' + tlJoinLink(code) +
+        '\n\nBelum punya app Android? Unduh: https://github.com/rezamahendraaa23/cartertag-connect/releases/latest' +
+        '\nKode manual: CT-' + code;
+}
 function tlCodeCard(label, code, sub) {
+    var link = tlJoinLink(code);
     return '<div class="card"><div class="eyebrow">' + label + '</div><div class="tl-code"><b>CT-' + esc(code) + '</b>' +
-        '<button class="btn ghost sm" onclick="copyText(\'CT-' + esc(code) + '\')">Salin</button>' +
-        '<button class="btn ghost sm" onclick="tlQrModal(\'' + label + '\', \'CT-' + esc(code) + '\')">QR</button></div>' +
-        '<p class="hint" style="margin:8px 0 0">' + sub + '</p></div>';
+        '<button class="btn ghost sm" onclick="copyText(\'CT-' + esc(code) + '\')">Salin kode</button>' +
+        '<button class="btn ghost sm" onclick="copyText(\'' + esc(link) + '\')">Salin link</button>' +
+        '<a class="btn sm" style="text-decoration:none;display:inline-flex" target="_blank" rel="noopener" href="https://wa.me/?text=' +
+        encodeURIComponent(tlShareText(label, code)) + '">Bagikan ke WhatsApp</a>' +
+        '<button class="btn ghost sm" onclick="tlQrModal(\'' + label + '\', \'' + esc(link) + '\')">QR</button></div>' +
+        '<p class="hint" style="margin:8px 0 0">' + sub + '</p>' +
+        '<p class="hint" style="margin:4px 0 0">Link: <code style="word-break:break-all">' + esc(link) + '</code></p></div>';
 }
 function tlDrawSettings(b) {
     var d = TL.data, c = d.cfg, edit = canEdit('timlapangan');
@@ -86,8 +101,8 @@ function tlDrawSettings(b) {
     b.innerHTML = tlFbWarn() +
         '<div class="kpis">' + kpi('Sudah gabung', d.counts.total, '') + kpi('Driver', d.counts.driver || 0, '') +
         kpi('Koordinator', d.counts.koordinator || 0, '') + kpi('Epoch kunci', c.epoch, 'naik saat reset') + '</div>' +
-        tlCodeCard('Kode Driver', d.codes.driver, 'Driver buka app, isi <b>nama + kode ini + nomor mobil</b>, langsung masuk.') +
-        tlCodeCard('Kode Koordinator', d.codes.koordinator, 'Untuk koordinator/panitia: bisa kirim pengumuman & mulai absen. Jangan dibagikan ke driver.') +
+        tlCodeCard('Kode Driver', d.codes.driver, 'Bagikan link ke grup driver. Diklik di HP yang sudah pasang app: langsung masuk, tinggal isi nomor mobil.') +
+        tlCodeCard('Kode Koordinator', d.codes.koordinator, 'Untuk koordinator/panitia (bisa kirim pengumuman & mulai absen). Jangan dibagikan ke grup driver.') +
         '<div class="card"><label class="tl-row"><input type="checkbox" ' + (c.manifest.enabled ? 'checked' : '') + (edit ? '' : ' disabled') + ' onchange="tlSave({manifest:{enabled:this.checked}})"> ' +
         '<span><b>Tampilkan manifest penumpang di app</b><br><span class="hint">Driver melihat penumpang sesuai nomor mobil yang dia isi (dari Plotingan Mobil).</span></span></label></div>' +
         (edit ? '<div class="tl-row"><button class="btn danger sm" onclick="tlResetCode()">Reset kedua kode</button>' +

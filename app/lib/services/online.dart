@@ -24,11 +24,15 @@ class Online {
   final _connCtl = StreamController<bool>.broadcast();
   final _envCtl = StreamController<Uint8List>.broadcast();
   final _annCtl = StreamController<Map<String, dynamic>>.broadcast();
+  final _locCtl = StreamController<MapEntry<String, Map<String, dynamic>>>.broadcast();
   final _subs = <StreamSubscription>[];
 
   Stream<bool> get connection => _connCtl.stream;
   Stream<Uint8List> get envelopes => _envCtl.stream;
   Stream<Map<String, dynamic>> get consoleAnnouncements => _annCtl.stream;
+
+  /// Lokasi anggota dari presence (member_id -> {lat, lng, acc, bat, at}).
+  Stream<MapEntry<String, Map<String, dynamic>>> get locations => _locCtl.stream;
   bool get ready => _db != null;
 
   static FirebaseOptions? optionsFrom(Map<String, dynamic>? fb) {
@@ -75,7 +79,8 @@ class Online {
         if (connected) _presence(c);
       }));
       final since = (await Store.i.get<int>('online_since_${c.slug}')) ?? 0;
-      final q = _db!.ref('c/${c.slug}/env').orderByChild('t').startAt(since > 0 ? since - 120000 : 0);
+      final base = _db!.ref('c/${c.slug}/env').orderByChild('t');
+      final q = since > 0 ? base.startAt(since - 120000) : base.limitToLast(500);
       _subs.add(q.onChildAdded.listen((e) {
         final v = e.snapshot.value;
         if (v is Map && v['e'] is String) {
@@ -86,6 +91,15 @@ class Online {
           if (t is int) Store.i.put('online_since_${c.slug}', t);
         }
       }, onError: (_) {}));
+      void loc(DatabaseEvent e) {
+        final v = e.snapshot.value;
+        if (v is Map && v['lat'] is num && v['lng'] is num) {
+          _locCtl.add(MapEntry('${e.snapshot.key}', {'lat': v['lat'], 'lng': v['lng'], 'acc': v['acc'], 'bat': v['bat'], 'at': v['at']}));
+        }
+      }
+
+      _subs.add(_db!.ref('c/${c.slug}/presence').onChildAdded.listen(loc, onError: (_) {}));
+      _subs.add(_db!.ref('c/${c.slug}/presence').onChildChanged.listen(loc, onError: (_) {}));
       _subs.add(_db!.ref('c/${c.slug}/ann').onChildAdded.listen((e) {
         final v = e.snapshot.value;
         if (v is Map) _annCtl.add(v.cast<String, dynamic>());

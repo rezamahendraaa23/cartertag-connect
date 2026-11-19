@@ -48,5 +48,13 @@ class Store {
   final kv = StoreRef<String, Object?>('kv');
 
   Future<T?> get<T>(String key) async => (await kv.record(key).get(db)) as T?;
-  Future<void> put(String key, Object? value) => kv.record(key).put(db, value);
+  /// Simpan pengaturan. sembast tidak menerima nilai null, jadi null = hapus kunci
+  /// (dulu menyimpan null melempar error dan menggagalkan "Keluar & hapus", "Gabung konser lain", dan batal SOS).
+  Future<void> put(String key, Object? value) async {
+    if (value == null) {
+      await kv.record(key).delete(db);
+    } else {
+      await kv.record(key).put(db, value);
+    }
+  }
 }

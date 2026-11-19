@@ -50,6 +50,25 @@ class ChatListScreen extends StatelessWidget {
           final dms = last.keys.where((k) => k.startsWith('d:')).map(h.channelById).toList()
             ..sort((a, b) => ((last[b.id]!['ts'] as num).compareTo(last[a.id]!['ts'] as num)));
           return ListView(padding: const EdgeInsets.only(bottom: 96), children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+              child: Material(
+                color: CT.of(context).cardLow,
+                borderRadius: BorderRadius.circular(24),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(24),
+                  onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MembersScreen(search: true))),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    child: Row(children: [
+                      Icon(LucideIcons.search, size: 20, color: CT.of(context).muted),
+                      const SizedBox(width: 12),
+                      Text('Cari nama atau nomor mobil', style: TextStyle(color: CT.of(context).muted, fontSize: 15)),
+                    ]),
+                  ),
+                ),
+              ),
+            ),
             const _LatestAnnouncement(),
             for (final ch in groups) _ChannelTile(ch: ch, last: last[ch.id], times: counts[ch.id] ?? const []),
             if (dms.isNotEmpty) const SectionLabel('Pesan pribadi'),
@@ -173,7 +192,10 @@ class _ChannelTile extends StatelessWidget {
 
 /// S10 — Anggota & mulai DM.
 class MembersScreen extends StatefulWidget {
-  const MembersScreen({super.key});
+  const MembersScreen({super.key, this.search = false});
+
+  /// true = dibuka dari kolom cari: keyboard langsung muncul.
+  final bool search;
   @override
   State<MembersScreen> createState() => _MembersScreenState();
 }
@@ -184,19 +206,30 @@ class _MembersScreenState extends State<MembersScreen> {
   Widget build(BuildContext context) {
     final h = Hub.i;
     final c = CT.of(context);
-    final list = h.roster.where((m) => m.id != h.me.id && (q.isEmpty || m.name.toLowerCase().contains(q) || m.car.contains(q))).toList()
-      ..sort((a, b) => a.name.compareTo(b.name));
+    final list = h.roster.where((m) => m.id != h.me.id && m.matches(q)).toList()
+      ..sort((a, b) {
+        // driver urut nomor mobil, lalu yang lain urut nama
+        if (a.isDriver != b.isDriver) return a.isDriver ? -1 : 1;
+        if (a.isDriver) return (int.tryParse(a.car) ?? 9999).compareTo(int.tryParse(b.car) ?? 9999);
+        return a.name.compareTo(b.name);
+      });
     final near = {for (final p in h.meshPeersList) p.memberId};
     return Scaffold(
-      appBar: AppBar(title: Text('Anggota (${h.roster.length})')),
+      appBar: AppBar(title: Text(widget.search ? 'Cari' : 'Anggota (${h.roster.length})')),
       body: Column(children: [
         Padding(
           padding: const EdgeInsets.all(16),
           child: TextField(
-            decoration: const InputDecoration(labelText: 'Cari nama atau nomor mobil', prefixIcon: Icon(LucideIcons.search)),
+            autofocus: widget.search,
+            decoration: const InputDecoration(hintText: 'Nama, nomor mobil (mis. 3), atau plat', prefixIcon: Icon(LucideIcons.search)),
             onChanged: (v) => setState(() => q = v.toLowerCase().trim()),
           ),
         ),
+        if (list.isEmpty)
+          Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text(q.isEmpty ? 'Belum ada anggota lain yang gabung.' : 'Tidak ada yang cocok dengan "$q".', style: TextStyle(color: c.muted)),
+          ),
         Expanded(
           child: ListView.builder(
             itemCount: list.length,
@@ -206,7 +239,7 @@ class _MembersScreenState extends State<MembersScreen> {
               return ListTile(
                 minTileHeight: 64,
                 leading: Avatar(name: m.name),
-                title: Text(m.name, style: Theme.of(context).textTheme.titleMedium),
+                title: Text(m.isDriver && m.car.isNotEmpty ? '${m.carLabel} · ${m.name}' : m.name, style: Theme.of(context).textTheme.titleMedium),
                 subtitle: Text([m.roleLabel, if (m.area.isNotEmpty) 'Area ${m.area}', if (!m.joined) 'belum gabung'].join(' · ')),
                 trailing: Row(mainAxisSize: MainAxisSize.min, children: [
                   if (near.contains(m.id)) StatusChip(label: 'Dekat', icon: LucideIcons.network, fg: c.accent, bg: c.accentBg, dense: true),
@@ -257,7 +290,44 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   int recLeft = 15;
   StreamSubscription? _sub;
 
+  /// Tag @ di grup: label yang sudah dipilih -> member_id, dan saran yang sedang tampil.
+  final Map<String, String> _tags = {};
+  List<Member> _suggest = const [];
+  int _atStart = -1;
+
   String get ch => widget.channel;
+
+  /// Cari token "@..." tepat sebelum kursor; isi daftar saran anggota.
+  void _updateMention() {
+    if (ch.startsWith('d:')) return;
+    final sel = text.selection.baseOffset;
+    final before = sel < 0 ? text.text : text.text.substring(0, sel);
+    final at = before.lastIndexOf('@');
+    var list = const <Member>[];
+    if (at >= 0 && (at == 0 || RegExp(r'\s').hasMatch(before[at - 1]))) {
+      final q = before.substring(at + 1);
+      if (!q.contains('\n') && q.length <= 20) {
+        list = Hub.i.roster.where((m) => m.id != Hub.i.me.id && m.joined && m.matches(q)).toList()
+          ..sort((a, b) {
+            if (a.isDriver != b.isDriver) return a.isDriver ? -1 : 1;
+            return (int.tryParse(a.car) ?? 9999).compareTo(int.tryParse(b.car) ?? 9999);
+          });
+        if (list.length > 6) list = list.sublist(0, 6);
+      }
+    }
+    _atStart = list.isEmpty ? -1 : at;
+    if (list.length != _suggest.length || !list.every(_suggest.contains)) setState(() => _suggest = list);
+  }
+
+  void _pickMention(Member m) {
+    final sel = text.selection.baseOffset < 0 ? text.text.length : text.selection.baseOffset;
+    if (_atStart < 0) return;
+    final label = m.tagLabel;
+    final next = '${text.text.substring(0, _atStart)}@$label ${text.text.substring(sel)}';
+    _tags[m.id] = label;
+    text.value = TextEditingValue(text: next, selection: TextSelection.collapsed(offset: _atStart + label.length + 2));
+    setState(() => _suggest = const []);
+  }
 
   @override
   void initState() {
@@ -271,7 +341,10 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         .listen((_) => Hub.i.markRead(ch));
     Hub.i.s.get<String>('draft_${Hub.i.slug}_$ch').then((d) => text.text = d ?? '');
     Hub.i.s.get<bool>('walkie_${Hub.i.slug}_$ch').then((v) => setState(() => walkie = v ?? false));
-    text.addListener(() => setState(() {}));
+    text.addListener(() {
+      _updateMention();
+      setState(() {});
+    });
     Hub.i.pttIncoming.addListener(_autoPlay);
   }
 
@@ -299,7 +372,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     if (t.length > 1000) return;
     setState(() => sending = true);
     try {
-      await Hub.i.sendText(ch, t, replyTo: replyId);
+      await Hub.i.sendText(ch, t, replyTo: replyId, tags: Map.of(_tags));
+      _tags.clear();
       text.clear();
       setState(() {
         replyTo = null;
@@ -505,6 +579,22 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
               Text('0:${recLeft.toString().padLeft(2, '0')}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 16)),
             ]),
           ),
+        if (_suggest.isNotEmpty)
+          Container(
+            margin: const EdgeInsets.fromLTRB(10, 0, 10, 4),
+            decoration: brutalBox(context),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              for (final m in _suggest)
+                ListTile(
+                  dense: true,
+                  minTileHeight: 52,
+                  leading: Avatar(name: m.name, size: 34),
+                  title: Text(m.tagLabel, style: const TextStyle(fontWeight: FontWeight.w600)),
+                  subtitle: Text(m.isDriver && m.car.isNotEmpty ? m.name : m.roleLabel),
+                  onTap: () => _pickMention(m),
+                ),
+            ]),
+          ),
         _composer(c, empty, over),
       ]),
     );
@@ -636,7 +726,8 @@ class Bubble extends StatelessWidget {
     final mine = m['mine'] == true;
     final quick = m['k'] == 'quick';
     final media = (m['media'] as Map?)?.cast<String, dynamic>();
-    final bg = mine ? c.bubbleMine : (quick ? c.amberBg : c.bubbleOther);
+    final tagged = !mine && ((m['tags'] as List?) ?? const []).contains(Hub.i.me.id);
+    final bg = mine ? c.bubbleMine : (quick || tagged ? c.amberBg : c.bubbleOther);
     final fg = mine ? c.onBubbleMine : c.ink;
     const nameColors = [Color(0xFF1D5DAA), Color(0xFF047857), Color(0xFF7C3AED), Color(0xFFB45309), Color(0xFFBE185D), Color(0xFF0E7490)];
     final nameColor = nameColors['${m['from']}'.codeUnits.fold<int>(0, (a, b) => a + b) % nameColors.length];
@@ -690,7 +781,10 @@ class Bubble extends StatelessWidget {
                   ),
                 if (media != null) MediaView(channel: channel, media: media, fg: fg),
                 if ('${m['text'] ?? ''}'.isNotEmpty)
-                  Text('${m['text']}', style: TextStyle(fontSize: 15.5, height: 1.35, color: fg, fontWeight: quick ? FontWeight.w600 : FontWeight.w400)),
+                  Text.rich(
+                    _withTags('${m['text']}', ((m['tl'] as List?) ?? const []).map((e) => '@$e').toList(), c.accent),
+                    style: TextStyle(fontSize: 15.5, height: 1.35, color: fg, fontWeight: quick ? FontWeight.w600 : FontWeight.w400),
+                  ),
                 const SizedBox(height: 2),
                 Align(alignment: Alignment.centerRight, widthFactor: 1, child: _Meta(id: id, m: m, fg: c.muted, channel: channel)),
               ]),
@@ -749,6 +843,31 @@ class Bubble extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Teks pesan dengan bagian "@Mobil 3" / "@Nama" dicetak tebal biru.
+TextSpan _withTags(String text, List<String> tags, Color color) {
+  if (tags.isEmpty) return TextSpan(text: text);
+  final spans = <InlineSpan>[];
+  var i = 0;
+  while (i < text.length) {
+    var hit = -1, len = 0;
+    for (final t in tags) {
+      final j = text.indexOf(t, i);
+      if (j >= 0 && (hit < 0 || j < hit)) {
+        hit = j;
+        len = t.length;
+      }
+    }
+    if (hit < 0) {
+      spans.add(TextSpan(text: text.substring(i)));
+      break;
+    }
+    if (hit > i) spans.add(TextSpan(text: text.substring(i, hit)));
+    spans.add(TextSpan(text: text.substring(hit, hit + len), style: TextStyle(color: color, fontWeight: FontWeight.w700)));
+    i = hit + len;
+  }
+  return TextSpan(children: spans);
 }
 
 class _Meta extends StatelessWidget {

@@ -14,9 +14,32 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 
+/** Izin minimum untuk mesh BLE. Android 12+: SCAN/ADVERTISE/CONNECT; Android 11 ke bawah: lokasi. */
+fun hasBluetoothPermission(ctx: android.content.Context): Boolean {
+    val need = if (Build.VERSION.SDK_INT >= 31) listOf(
+        android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.BLUETOOTH_ADVERTISE, android.Manifest.permission.BLUETOOTH_CONNECT
+    ) else listOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
+    return need.all { ctx.checkSelfPermission(it) == android.content.pm.PackageManager.PERMISSION_GRANTED }
+}
+
 class MainActivity : FlutterActivity() {
 
     private var routeChannel: MethodChannel? = null
+
+    /** Rute dari notifikasi / link yang belum diambil Flutter (diambil lewat ct/route "initial"). */
+    private var pendingRoute: String? = null
+
+    /** "route" dari notifikasi, atau "join:CT-XXXXXX" dari link https://cartertag-connect.web.app/join?kode=... */
+    private fun routeOf(intent: Intent?): String? {
+        if (intent == null) return null
+        intent.getStringExtra("route")?.let { return it }
+        val data = intent.data ?: return null
+        if (data.host == "cartertag-connect.web.app" && (data.path ?: "").startsWith("/join")) {
+            val kode = data.getQueryParameter("kode") ?: data.getQueryParameter("k") ?: return "join:"
+            return "join:" + kode
+        }
+        return null
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -34,11 +57,16 @@ class MainActivity : FlutterActivity() {
             try {
                 when (call.method) {
                     "start" -> {
-                        @Suppress("UNCHECKED_CAST")
+                        // Android 14+: service tipe connectedDevice WAJIB sudah punya izin Bluetooth, kalau tidak startForeground crash.
+                        if (!hasBluetoothPermission(this)) { result.success(false); return@setMethodCallHandler }
                         val names = (call.argument<Map<String, String>>("names") ?: emptyMap())
-                        MeshService.start(this, call.argument<String>("cid")!!, call.argument<String>("mid")!!,
-                            call.argument<String>("concert") ?: "", names)
-                        result.success(true)
+                        try {
+                            MeshService.start(this, call.argument<String>("cid")!!, call.argument<String>("mid")!!,
+                                call.argument<String>("concert") ?: "", names)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.success(false)
+                        }
                     }
                     "stop" -> { MeshService.stop(this); MeshBus.clearConfig(this); result.success(null) }
                     "send" -> {
@@ -74,13 +102,18 @@ class MainActivity : FlutterActivity() {
             }
         }
 
-        routeChannel = MethodChannel(messenger, "ct/route")
-        intent?.getStringExtra("route")?.let { r -> routeChannel?.invokeMethod("open", r) }
+        pendingRoute = routeOf(intent)
+        routeChannel = MethodChannel(messenger, "ct/route").also { ch ->
+            ch.setMethodCallHandler { call, result ->
+                if (call.method == "initial") { result.success(pendingRoute); pendingRoute = null } else result.notImplemented()
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        intent.getStringExtra("route")?.let { routeChannel?.invokeMethod("open", it) }
+        setIntent(intent)
+        routeOf(intent)?.let { routeChannel?.invokeMethod("open", it) }
     }
 
     /** Minta dikecualikan dari optimasi baterai supaya mesh tidak dimatikan sistem (PRD M1.2). */

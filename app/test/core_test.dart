@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:cartertag_connect/core/crypto.dart';
 import 'package:cartertag_connect/core/envelope.dart';
 import 'package:cartertag_connect/core/ids.dart';
+import 'package:cartertag_connect/data/models.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -69,6 +70,27 @@ void main() {
     final sealed = await sealBytes(data, k);
     expect(await openBytes(sealed, k), data);
     expect(await openBytes(sealed, SecretKey(List.filled(32, 0))), isNull);
+  });
+
+  test('cari anggota pakai nomor mobil, nama, atau plat', () {
+    final driver = Member({'mid': 'm_a', 'n': 'Budi Santoso', 'r': 'driver', 'car': '3', 'plat': 'B 1234 CTG'});
+    final driver12 = Member({'mid': 'm_b', 'n': 'Andi', 'r': 'driver', 'car': '12'});
+    final koord = Member({'mid': 'm_c', 'n': 'Rina', 'r': 'koordinator'});
+    for (final q in ['3', 'c3', 'C 3', 'mobil 3', 'Mobil 3', 'm3', 'budi', 'B1234', 'b 1234']) {
+      expect(driver.matches(q), isTrue, reason: q);
+    }
+    expect(driver.matches('4'), isFalse);
+    expect(driver12.matches('1'), isTrue);
+    expect(driver12.matches('mobil 12'), isTrue);
+    expect(koord.matches('3'), isFalse);
+    expect(koord.matches('rin'), isTrue);
+    expect(driver.tagLabel, 'C3');
+    expect(driver.roleLabel, 'Driver C3');
+    expect(carName('3'), 'C3');
+    expect(carName('c3'), 'C3');
+    expect(carDigits('C3'), '3');
+    expect(carDigits('mobil 12'), '12');
+    expect(koord.tagLabel, 'Rina');
   });
 
   test('dmChannel urutan stabil', () {
