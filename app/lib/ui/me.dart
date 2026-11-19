@@ -15,6 +15,7 @@ import '../services/hub.dart';
 import '../services/mesh.dart';
 import '../services/online.dart';
 import '../services/updater.dart';
+import 'root.dart';
 import 'widgets.dart';
 
 /// S24 — Saya: profil & pengaturan.
@@ -210,7 +211,7 @@ class ConcertsScreen extends StatelessWidget {
             child: OutlinedButton.icon(
               onPressed: () async {
                 await Hub.i.detachForNewJoin();
-                if (context.mounted) Navigator.of(context).popUntil((r) => r.isFirst);
+                if (context.mounted) openRoot(context);
               },
               icon: const Icon(LucideIcons.plus),
               label: const Text('Gabung konser lain'),

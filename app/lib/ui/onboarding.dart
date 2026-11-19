@@ -13,6 +13,7 @@ import '../data/models.dart';
 import '../services/api.dart';
 import '../services/hub.dart';
 import '../services/mesh.dart';
+import 'root.dart';
 import 'widgets.dart';
 
 /// S01/S02 — Selamat datang.
@@ -247,6 +248,15 @@ class _JoinScreenState extends State<JoinScreen> {
     }
   }
 
+  /// Scan QR: QR kode dari admin mengisi kolom Kode; QR undangan langsung membuka alur gabung offline.
+  Future<void> _scan() async {
+    final r = await Navigator.of(context).push<String>(MaterialPageRoute(builder: (_) => const InviteScanScreen()));
+    if (r != null && mounted) {
+      setState(() => code.text = r);
+      toast(context, 'Kode $r terisi. Lengkapi nama lalu Gabung.');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context).textTheme;
@@ -276,7 +286,14 @@ class _JoinScreenState extends State<JoinScreen> {
               textInputAction: TextInputAction.next,
               style: mono(18, w: FontWeight.w700),
               inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9-]')), LengthLimitingTextInputFormatter(9)],
-              decoration: const InputDecoration(labelText: 'Kode', hintText: 'CT-XXXXXX', prefixIcon: Icon(LucideIcons.keyRound)),
+              decoration: InputDecoration(
+                labelText: 'Kode',
+                hintText: 'CT-XXXXXX',
+                prefixIcon: const Icon(LucideIcons.keyRound),
+                suffixIcon: kIsWeb
+                    ? null
+                    : IconButton(tooltip: 'Scan QR kode', icon: const Icon(LucideIcons.scanLine), onPressed: busy ? null : _scan),
+              ),
               validator: (v) => (v ?? '').toUpperCase().replaceAll(RegExp(r'^CT-?'), '').replaceAll('-', '').length != 6 ? 'Kode terdiri dari 6 karakter' : null,
             ),
             const SizedBox(height: 14),
@@ -322,9 +339,9 @@ class _JoinScreenState extends State<JoinScreen> {
             const SizedBox(height: 8),
             if (!kIsWeb)
               TextButton.icon(
-                onPressed: busy ? null : () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const InviteScanScreen())),
+                onPressed: busy ? null : _scan,
                 icon: const Icon(LucideIcons.scanLine, size: 20),
-                label: const Text('Tidak ada internet? Scan QR dari teman tim'),
+                label: const Text('Scan QR kode / undangan'),
               ),
           ]),
         ),
@@ -372,7 +389,7 @@ class ConfirmScreen extends StatelessWidget {
             const SizedBox(height: 18),
             Text('Data sudah tersimpan di HP ini, bisa dipakai tanpa sinyal.', textAlign: TextAlign.center, style: t.bodyMedium?.copyWith(color: c.muted)),
             const Spacer(flex: 2),
-            FilledButton(onPressed: () => Navigator.of(context).popUntil((r) => r.isFirst), child: const Text('Buka chat')),
+            FilledButton(onPressed: () => openRoot(context), child: const Text('Buka chat')),
           ]),
         ),
       ),
@@ -395,11 +412,28 @@ class _InviteScanScreenState extends State<InviteScanScreen> {
   final _form = GlobalKey<FormState>();
   bool busy = false;
 
+  final _ctl = MobileScannerController(formats: const [BarcodeFormat.qrCode], detectionSpeed: DetectionSpeed.normal);
+  bool _done = false;
+
+  @override
+  void dispose() {
+    _ctl.dispose();
+    super.dispose();
+  }
+
   void _detect(BarcodeCapture cap) {
-    if (qr != null) return;
+    if (qr != null || _done) return;
     for (final b in cap.barcodes) {
-      final raw = b.rawValue;
-      if (raw == null) continue;
+      final raw = (b.rawValue ?? '').trim();
+      if (raw.isEmpty) continue;
+      // QR kode dari admin: "CT-XXXXXX" -> kembali ke form Gabung dengan kode terisi
+      final m = RegExp(r'^(?:CT-?)?([2-9A-HJ-NP-Z]{6})$', caseSensitive: false).firstMatch(raw);
+      if (m != null) {
+        _done = true;
+        HapticFeedback.mediumImpact();
+        Navigator.of(context).pop('CT-${m.group(1)!.toUpperCase()}');
+        return;
+      }
       try {
         final j = (jsonDecode(raw) as Map).cast<String, dynamic>();
         if (j['t'] != 'ct-invite') continue;
@@ -407,12 +441,14 @@ class _InviteScanScreenState extends State<InviteScanScreen> {
           setState(() => error = 'QR sudah kedaluwarsa. Minta dibuat ulang.');
           return;
         }
+        HapticFeedback.mediumImpact();
         setState(() {
           qr = j;
           error = null;
         });
         return;
       } catch (_) {}
+      if (error == null) setState(() => error = 'QR ini bukan kode atau undangan CarterTag Connect.');
     }
   }
 
@@ -436,14 +472,14 @@ class _InviteScanScreenState extends State<InviteScanScreen> {
             ? Column(children: [
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
-                  child: Text('Arahkan kamera ke QR di HP teman tim (menu Saya → Undang via QR).', style: t.bodyLarge?.copyWith(color: c.muted)),
+                  child: Text('Scan QR Kode Driver / Kode Koordinator dari admin, atau QR undangan dari HP teman tim.', style: t.bodyLarge?.copyWith(color: c.muted)),
                 ),
                 Expanded(
                   child: Container(
                     margin: const EdgeInsets.fromLTRB(20, 0, 20, 20),
                     clipBehavior: Clip.antiAlias,
                     decoration: BoxDecoration(borderRadius: BorderRadius.circular(20)),
-                    child: MobileScanner(onDetect: _detect),
+                    child: MobileScanner(controller: _ctl, onDetect: _detect),
                   ),
                 ),
                 if (error != null) InfoBanner(tone: Tone.danger, text: error!, margin: const EdgeInsets.fromLTRB(20, 0, 20, 20)),

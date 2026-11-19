@@ -9,11 +9,8 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import 'core/theme.dart';
 import 'data/store.dart';
-import 'services/bridge_client.dart';
 import 'services/hub.dart';
-import 'ui/bridge_join.dart';
-import 'ui/home.dart';
-import 'ui/onboarding.dart';
+import 'ui/root.dart';
 
 /// Push FCM saat app tertutup: hanya metadata (isi pesan terenkripsi), tampilkan notifikasi ringkas.
 @pragma('vm:entry-point')
@@ -100,14 +97,7 @@ class _ConnectAppState extends State<ConnectApp> {
         final mq = MediaQuery.of(context);
         return MediaQuery(data: mq.copyWith(textScaler: TextScaler.linear(mq.textScaler.scale(1) * textScale.value)), child: child!);
       },
-      home: ListenableBuilder(
-        listenable: Hub.i,
-        builder: (context, _) {
-          if (Hub.i.concert != null) return const HomeShell();
-          if (kIsWeb && Bridge.i.isLocalOrigin) return const BridgeJoinScreen();
-          return const WelcomeScreen();
-        },
-      ),
+      home: const RootGate(),
     );
   }
 }
