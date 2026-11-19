@@ -161,6 +161,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       if (b != null) await _activate(Concert(Map<String, dynamic>.from(b)));
     }
     if (kIsWeb) Bridge.i.autoConnect();
+    if (netUp) unawaited(_flushPendingLeaves());
   }
 
   @override
@@ -290,10 +291,20 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     await _activate(Concert(Map<String, dynamic>.from(b)));
   }
 
-  /// Keluar dari konser: hapus semua data lokal konser itu.
+  /// Keluar dari konser: beri tahu server (admin melihat status "Keluar"), lalu hapus semua data lokal konser itu.
+  /// Offline: pemberitahuan disimpan dan dikirim begitu ada internet (_flushPendingLeaves).
   Future<void> leave() async {
     final sl = slug;
     if (sl.isEmpty) return;
+    final token = concert!.token;
+    if (token.isNotEmpty) {
+      try {
+        await Api.call('leave', {'member_token': token}, timeout: const Duration(seconds: 8));
+      } catch (_) {
+        final pend = ((jsonDecode((await s.get<String>('pending_leaves')) ?? '[]') as List?) ?? const []).map((e) => '$e').toList()..add(token);
+        await s.put('pending_leaves', jsonEncode(pend));
+      }
+    }
     await _teardown();
     final f = Finder(filter: Filter.equals('slug', sl));
     for (final st in [s.messages, s.outbox, s.anns, s.rollcalls, s.fleet, s.checkins, s.sos, s.locations, s.reports]) {
@@ -439,7 +450,25 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     if (netUp && kIsWeb && !Bridge.i.connected) unawaited(refresh());
   }
 
+  /// Kirim pemberitahuan "keluar" yang tertunda karena saat itu offline.
+  Future<void> _flushPendingLeaves() async {
+    final raw = await s.get<String>('pending_leaves');
+    if (raw == null) return;
+    final left = <String>[];
+    for (final t in ((jsonDecode(raw) as List?) ?? const []).map((e) => '$e')) {
+      try {
+        await Api.call('leave', {'member_token': t}, timeout: const Duration(seconds: 10));
+      } on ApiError catch (e) {
+        if (e.isNetwork) left.add(t); // coba lagi nanti; error lain (token kedaluwarsa dll.) dibuang
+      } catch (_) {
+        left.add(t);
+      }
+    }
+    await s.put('pending_leaves', left.isEmpty ? null : jsonEncode(left));
+  }
+
   void _onNetworkBack() {
+    unawaited(_flushPendingLeaves());
     unawaited(Updater.i.check());
     if (concert == null) return;
     refresh();

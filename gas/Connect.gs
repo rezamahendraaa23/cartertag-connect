@@ -47,6 +47,7 @@ function connectHandle_(e) {
 var CONNECT_ACTIONS_ = {
   join: function (b) { return connectJoin_(b); },
   refresh: function (b) { return connectRefresh_(b); },
+  leave: function (b) { return connectLeave_(b); },
   notify: function (b) { return connectNotify_(b); },
   media_upload: function (b) { return connectMediaUpload_(b); },
   media_get: function (b) { return connectMediaGet_(b); },
@@ -148,6 +149,7 @@ function connectAuth_(token) {
   if (!cfg.enabled) throw connectError_('disabled', 'Connect untuk konser ini sedang nonaktif.');
   var team = connectTeam_(), me = team.byId[p.m];
   if (!me || me.status === 'dikeluarkan') throw connectError_('removed', 'Kamu sudah tidak terdaftar di tim konser ini.');
+  if (me.status === 'keluar') throw connectError_('left', 'Kamu sudah keluar dari tim konser ini. Gabung lagi pakai kode.');
   return { konser: k, cfg: cfg, team: team, me: me };
 }
 
@@ -304,7 +306,7 @@ function connectBundle_(k, cfg, team, me) {
     konser: { slug: k.slug, nama: k.config.name || k.nama, venue: k.config.venue || '', dates: dates },
     epoch: cfg.epoch,
     group_key: connectGroupKey_(k.slug, cfg.epoch),
-    roster: team.list.filter(function (m) { return m.status !== 'dikeluarkan'; }).map(connectRosterEntry_),
+    roster: team.list.filter(function (m) { return m.status !== 'dikeluarkan' && m.status !== 'keluar'; }).map(connectRosterEntry_),
     manifest: connectManifestFor_(connectManifest_(cfg), me),
     firebase: fb,
     app: { version: setting_('CONNECT_APP_VERSION'), apk_url: setting_('CONNECT_APK_URL'), pwa_url: setting_('CONNECT_PWA_URL') },
@@ -358,7 +360,13 @@ function connectJoin_(b) {
     me.area = info.area; me.plat = info.plat;
     me.nama = nama;
     var hp = connectHp_(b.hp);
-    if (hp) me.hp = hp;   // opsional: supaya tim bisa telepon / WhatsApp
+    if (hp) {
+      me.hp = hp;   // opsional: supaya tim bisa telepon / WhatsApp
+      // nomor HP sama tapi perangkat lain (app dipasang ulang / ganti HP): baris lama dianggap keluar
+      team.list.forEach(function (o) {
+        if (o.member_id !== me.member_id && o.hp === hp && o.status === 'aktif') { o.status = 'keluar'; connectUpsertMember_(o); }
+      });
+    }
     me.pub_x = String(b.pub_x); me.pub_ed = String(b.pub_ed);
     me.platform = b.platform === 'web' ? 'web' : 'android';
     me.fcm_token = cap_(b.fcm_token, 400);
@@ -381,6 +389,21 @@ function connectRefresh_(b) {
     c.put(seenKey, '1', 600);
   }
   return connectBundle_(a.konser, a.cfg, a.team, me);
+}
+
+/** Anggota menekan "Keluar & hapus konser" di app: tandai keluar (boleh gabung lagi, beda dengan dikeluarkan admin). */
+function connectLeave_(b) {
+  var parts = String(b.member_token || '').split('.');
+  if (parts.length !== 2 || connectSign_(parts[0]) !== parts[1]) throw connectError_('auth', 'Sesi tidak valid.');
+  var p = parseJson_(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString(), {});
+  if (!p.s || !p.m) throw connectError_('auth', 'Sesi tidak valid.');
+  useKonser_(p.s);
+  return withLock_(function () {
+    var me = connectTeam_(true).byId[p.m];
+    if (!me) return { left: false };
+    if (me.status !== 'dikeluarkan') { me.status = 'keluar'; me.fcm_token = ''; connectUpsertMember_(me); }
+    return { left: true };
+  });
 }
 
 // ============================================================ notifikasi (FCM)
@@ -616,7 +639,7 @@ function connectAdminSnapshot_(k) {
   var cfg = connectCfg_(k), team = connectTeam_();
   var counts = { total: 0, aktif: 0, driver: 0, panitia: 0, koordinator: 0 };
   team.list.forEach(function (m) {
-    if (m.status === 'dikeluarkan') return;
+    if (m.status === 'dikeluarkan' || m.status === 'keluar') return;
     counts.total++; if (m.status === 'aktif') counts.aktif++; counts[m.role] = (counts[m.role] || 0) + 1;
   });
   return {
@@ -686,7 +709,7 @@ function adminConnectMemberUpdate(token, slug, memberId, patch) {
         m.role = patch.role;
       }
       if (patch.status !== undefined) {
-        if (['dikeluarkan', 'aktif', 'diundang'].indexOf(patch.status) === -1) throw new Error('Status tidak dikenal.');
+        if (['dikeluarkan', 'aktif', 'diundang', 'keluar'].indexOf(patch.status) === -1) throw new Error('Status tidak dikenal.');
         m.status = patch.status === 'aktif' && !m.pub_x ? 'diundang' : patch.status;
       }
       connectUpsertMember_(m);

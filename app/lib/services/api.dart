@@ -52,7 +52,7 @@ class ApiError implements Exception {
   final String code;
   final String message;
   bool get isNetwork => code == 'network';
-  bool get isAuth => code == 'auth' || code == 'removed';
+  bool get isAuth => code == 'auth' || code == 'removed' || code == 'left';
   @override
   String toString() => message;
 }

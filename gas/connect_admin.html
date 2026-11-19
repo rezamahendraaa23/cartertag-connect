@@ -116,14 +116,18 @@ function tlResetCode() {
 /* ---- C02 Anggota */
 function tlDrawMembers(b) {
     var d = TL.data, edit = canEdit('timlapangan');
-    var rows = d.members.slice().sort(function (a, b) { return (a.role + a.nama).localeCompare(b.role + b.nama); });
+    var rank = function (m) { return m.status === 'aktif' ? 0 : (m.status === 'diundang' ? 1 : 2); };
+    var rows = d.members.slice().sort(function (a, b) { return rank(a) - rank(b) || (a.role + a.nama).localeCompare(b.role + b.nama); });
     b.innerHTML = '<div class="tl-row" style="margin-bottom:12px;justify-content:space-between"><input type="search" id="tlQ" placeholder="Cari nama / HP / mobil" oninput="tlFilterMembers()" style="max-width:320px">' +
         '</div>' +
         '<div class="card tbl-wrap"><table class="tl-tbl"><thead><tr><th>Nama</th><th>Role</th><th>Mobil</th><th>Status</th><th>Terakhir terlihat</th><th></th></tr></thead><tbody id="tlMembers">' +
         rows.map(function (m) {
-            var st = m.status === 'aktif' ? '<span class="tl-st ok">Aktif · ' + esc(m.platform || '-') + '</span>' : (m.status === 'dikeluarkan' ? '<span class="tl-st bad">Dikeluarkan</span>' : '<span class="tl-st warn">Belum gabung</span>');
+            var st = m.status === 'aktif' ? '<span class="tl-st ok">Aktif · ' + esc(m.platform || '-') + '</span>'
+                : (m.status === 'dikeluarkan' ? '<span class="tl-st bad">Dikeluarkan</span>'
+                : (m.status === 'keluar' ? '<span class="tl-st" title="Keluar sendiri dari app / diganti perangkat baru. Boleh gabung lagi.">Keluar</span>' : '<span class="tl-st warn">Belum gabung</span>'));
             var acts = !edit ? '' : '<select aria-label="Ubah role" onchange="tlMember(\'' + esc(m.member_id) + '\',{role:this.value})">' + ['driver', 'panitia', 'koordinator'].map(function (r) { return '<option value="' + r + '"' + (m.role === r ? ' selected' : '') + '>' + r + '</option>'; }).join('') + '</select> ' +
-                (m.status === 'dikeluarkan' ? '<button class="btn ghost sm" onclick="tlMember(\'' + esc(m.member_id) + '\',{status:\'aktif\'})">Pulihkan</button>' : '<button class="btn ghost sm" onclick="tlKick(\'' + esc(m.member_id) + '\',\'' + esc(m.nama) + '\')">Keluarkan</button>');
+                (m.status === 'dikeluarkan' ? '<button class="btn ghost sm" onclick="tlMember(\'' + esc(m.member_id) + '\',{status:\'aktif\'})">Pulihkan</button>'
+                    : (m.status === 'keluar' ? '<span class="hint">bisa gabung lagi</span>' : '<button class="btn ghost sm" onclick="tlKick(\'' + esc(m.member_id) + '\',\'' + esc(m.nama) + '\')">Keluarkan</button>'));
             return '<tr data-q="' + esc((m.nama + ' ' + m.hp + ' ' + m.mobil).toLowerCase()) + '"><td><b>' + esc(m.nama) + '</b><br><span class="hint">' + esc(m.hp) + '</span></td><td>' + esc(m.role) + '</td><td>' + esc(m.mobil || '-') + (m.area ? '<br><span class="hint">' + esc(m.area) + '</span>' : '') + '</td><td>' + st + '</td><td>' + esc(m.last_seen || '-') + '</td><td>' + acts + '</td></tr>';
         }).join('') + '</tbody></table></div>' +
         '<p class="hint">Anggota muncul otomatis setelah gabung pakai kode. Tidak perlu didaftarkan.</p>';
