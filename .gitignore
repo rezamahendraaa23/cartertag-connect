@@ -32,3 +32,6 @@ service-account*.json
 .DS_Store
 Thumbs.db
 .vscode/
+
+# video promo hasil render (besar, dibuat ulang dari cartertag new/video-promo)
+video/

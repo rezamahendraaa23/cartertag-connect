@@ -21,7 +21,7 @@ import kotlin.random.Random
  * Router: dedup, TTL, relay dengan jeda acak, simpan-teruskan, sinkron inventaris, gerbang ke klien jembatan.
  * Hanya memindahkan ciphertext; dekripsi terjadi di Flutter.
  */
-class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
+class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener, LanMesh.Listener {
 
     companion object {
         const val CH_SVC = "ct_mesh_service"
@@ -55,6 +55,8 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
     private var cfg: MeshConfig? = null
     private var notifSeq = 100
     private lateinit var reach: ReachWatch
+    /** Wi-Fi posko (router lokal tanpa internet). */
+    private lateinit var lan: LanMesh
     /** node hex -> member_id (dari link yang sudah bertukar hello + node), untuk HP yang terlihat di scan tapi belum tersambung. */
     private val nodeMid = ConcurrentHashMap<String, String>()
 
@@ -67,6 +69,7 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
         workerThread.start()
         worker = Handler(workerThread.looper)
         ble = BleMesh(this, this)
+        lan = LanMesh(this, this)
         channels()
         reach = ReachWatch(this)
         loadReach()
@@ -108,7 +111,7 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (cfg?.cid != c.cid) {
+        if (cfg?.cid != c.cid || cfg?.mid != c.mid) {
             ble.stop()
             cfg = c
             try {
@@ -116,9 +119,12 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
             } catch (e: SecurityException) {
                 Log.w(BleMesh.TAG, "izin Bluetooth belum diberikan: $e")   // service tetap hidup; jembatan & relay jalan setelah izin diberi + app dibuka ulang
             }
+            // Wi-Fi posko tidak butuh izin Bluetooth: tetap jalan walau BLE gagal
+            lan.start(Env.unhex(c.cid), Random.nextBytes(4), c.mid)
         } else {
             cfg = c   // konser sama: cukup perbarui nama/member, BLE tidak diputus
             if (!ble.isRunning) try { ble.start(Env.unhex(c.cid), Random.nextBytes(4)) } catch (_: SecurityException) {}
+            if (!lan.running) lan.start(Env.unhex(c.cid), Random.nextBytes(4), c.mid)
         }
         MeshBus.emitState(true)
         worker.postDelayed(pruneTask, 60_000)
@@ -130,6 +136,7 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
         try { reach.cancel() } catch (_: Exception) {}   // jangan tinggalkan alarm "Terputus" setelah keluar konser
         try { unregisterReceiver(btReceiver) } catch (_: Exception) {}
         ble.stop()
+        lan.stop()
         bridge?.stop()
         workerThread.quitSafely()
         MeshBus.emitState(false)
@@ -146,7 +153,9 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
                     // HP tim yang masih terlihat di scan (belum/sedang sambung ulang) = masih dalam jangkauan
                     (if (ble.isRunning) ble.seenNodes.entries
                         .filter { e -> now - e.value.at < 12_000 && linked.none { it.nodeHex == e.key || it.addr == e.value.addr } }
-                        .map { (nodeMid[it.key] ?: "") to it.value.rssiS } else emptyList())
+                        .map { (nodeMid[it.key] ?: "") to it.value.rssiS } else emptyList()) +
+                    // HP tim di Wi-Fi posko yang sama = tersambung (tanpa RSSI: dianggap sinyal kuat)
+                    lan.peers.values.filter { now - it.lastSeen < LanMesh.PEER_TTL_MS }.map { it.mid to (reach.weakDbm + 20) }
                 val btOn = try { android.bluetooth.BluetoothAdapter.getDefaultAdapter()?.isEnabled == true } catch (_: Exception) { true }
                 // UI mati melewati 06.00: "hari konser aktif" kedaluwarsa sendiri
                 if (reach.active && activeDay != today()) reach.active = false
@@ -226,6 +235,7 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
         synchronized(seen) { seen[id] = System.currentTimeMillis() }
         if (env.type != Env.T_LOC) store.put(env)
         ble.broadcast(BleMesh.K_ENV, bytes)
+        lan.send(LanMesh.K_ENV, bytes)
         bridge?.clients?.values?.forEach { if (it.approved) it.binary(bytes) }
     }
 
@@ -256,7 +266,11 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
             mapOf("addr" to it.value.addr, "mid" to (nodeMid[it.key] ?: ""), "rssi" to it.value.rssiS.toInt(), "rs" to it.value.rssiS,
                 "via" to "ble", "connected" to false, "ls" to it.value.at, "node" to it.key, "rc" to it.value.rawChangedAt)
         }
-        return linked + seen
+        val wifi = lan.peers.entries.filter { now - it.value.lastSeen < LanMesh.PEER_TTL_MS }.map {
+            mapOf("addr" to it.value.ip, "mid" to it.value.mid, "rssi" to 0, "rs" to 0.0,
+                "via" to "wifi", "connected" to true, "ls" to it.value.lastSeen, "node" to "lan-" + it.key, "rc" to 0L)
+        }
+        return linked + seen + wifi
     }
 
     fun status(): Map<String, Any> = mapOf(
@@ -268,21 +282,24 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
 
     // ------------------------------------------------------------ router
 
-    private fun accept(bytes: ByteArray, from: BleMesh.Link?, fromClient: String?) {
+    private fun accept(bytes: ByteArray, from: BleMesh.Link?, fromClient: String?, fromLan: Boolean = false) {
         val env = Env.parse(bytes) ?: return
         val c = cfg ?: return
         if (env.cidHex != c.cid) return
         val id = env.idHex
+        synchronized(seen) { if (seen.containsKey(id)) return }
+        if (store.has(id)) return
+        // batas 30/menit hanya untuk pesan segar (cegah banjir). Susulan pesan lama saat sinkron tidak dibatasi, dan pesan yang
+        // ditolak TIDAK ditandai terlihat, jadi masih bisa diterima lagi nanti.
+        if (System.currentTimeMillis() - env.ts < 120_000 && !allowRate(env)) return
         synchronized(seen) {
             if (seen.containsKey(id)) return
             seen[id] = System.currentTimeMillis()
         }
-        if (store.has(id)) return
-        if (!allowRate(env)) return
         if (env.type != Env.T_LOC) store.put(env)
 
         // ke UI (atau inbox + notifikasi kalau UI tidak berjalan)
-        val via = if (fromClient != null) "bridge" else "ble"
+        val via = if (fromClient != null) "bridge" else if (fromLan) "wifi" else "ble"
         if (!MeshBus.emitEnvelope(bytes, via)) {
             if (env.type != Env.T_LOC) store.inboxAdd(env)
             notifyNative(env)
@@ -296,6 +313,8 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
             val out = if (fromClient != null) bytes else env.relayed()
             val delay = if (env.prio >= 2) Random.nextLong(10, 80) else Random.nextLong(50, 300)
             worker.postDelayed({ ble.broadcast(BleMesh.K_ENV, out, except = from) }, delay)
+            // Bluetooth -> Wi-Fi posko (yang datang dari Wi-Fi sudah diterima semua HP di Wi-Fi itu)
+            if (!fromLan) worker.postDelayed({ lan.send(LanMesh.K_ENV, out) }, delay)
         }
     }
 
@@ -367,6 +386,34 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
 
     private fun emitPeers() = MeshBus.emitPeers(peersSnapshot())
 
+    // ---- LanMesh.Listener (dipanggil dari thread socket; pindah ke worker)
+
+    override fun onLanEnvelope(bytes: ByteArray, fromIp: String) { worker.post { accept(bytes, null, null, fromLan = true) } }
+
+    /** node Wi-Fi -> kapan terakhir disusulkan (cegah kirim ulang saat dia hilang-muncul karena hello terlewat). */
+    private val lanSynced = ConcurrentHashMap<String, Long>()
+
+    /**
+     * HP tim baru di Wi-Fi posko: kirim 150 pesan simpanan terbaru supaya dia menyusul. Hanya SATU HP yang mengirim
+     * (node terkecil di Wi-Fi ini), lewat unicast ke HP itu (Wi-Fi mengulang unicast yang gagal; broadcast tidak),
+     * paling sering sekali per 10 mnt per HP. Tanpa ini setiap HP menyiarkan 150 pesan sekaligus dan router tersumbat.
+     */
+    override fun onLanPeerNew(node: String, ip: String) {
+        // (lihat isSyncLeader / lanSynced)
+        worker.post {
+            val c = cfg ?: return@post
+            val now = System.currentTimeMillis()
+            if (now - (lanSynced[node] ?: 0L) < 10 * 60_000) return@post
+            if (!lan.isSyncLeader(node)) return@post
+            lanSynced[node] = now
+            val list = store.recent(c.cid, 150)
+            // dicicil supaya router & thread router mesh tidak tersumbat
+            list.forEachIndexed { i, b -> worker.postDelayed({ lan.sendTo(ip, LanMesh.K_ENV, b) }, i * 15L) }
+        }
+    }
+
+    override fun onLanPeersChanged() { worker.post { emitPeers() } }
+
     // ------------------------------------------------------------ jembatan
 
     fun bridgeStart(cb: (Map<String, Any>?, String?) -> Unit) {
@@ -384,7 +431,7 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener {
         if (t == "welcome") {
             c.approved = true
             val cf = cfg ?: return@post
-            store.recent(cf.cid, 300).forEach { c.binary(it) }
+            store.recent(cf.cid, 300, includeAck = true).forEach { c.binary(it) }
         } else if (t == "denied") {
             main.postDelayed({ c.close() }, 500)
         }

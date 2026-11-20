@@ -427,7 +427,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
               ListTile(
                 leading: const Icon(LucideIcons.bluetooth),
                 title: Text(h.member(p.memberId)?.name ?? (p.memberId.isEmpty ? 'HP tim' : p.memberId)),
-                subtitle: Text('${p.via.toUpperCase()} · RSSI ${p.rssi} dBm · ±${p.meters.round()} m'),
+                subtitle: Text(p.via == 'wifi' ? 'Wi-Fi posko (router lokal)' : '${p.via.toUpperCase()} · RSSI ${p.rssi} dBm · ±${p.meters.round()} m'),
                 trailing: Text(timeAgo(p.lastSeen), style: mono(12)),
               ),
             if (peers.isEmpty && Mesh.i.supported)

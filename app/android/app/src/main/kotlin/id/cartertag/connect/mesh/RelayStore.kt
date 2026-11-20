@@ -55,11 +55,17 @@ class RelayStore(ctx: Context) : SQLiteOpenHelper(ctx, "ct_mesh.db", null, 1) {
     }
 
     @Synchronized
-    fun recent(cid: String, limit: Int): List<ByteArray> {
+    /**
+     * [limit] envelope TERBARU (dikirim urut lama -> baru) untuk HP yang baru bergabung. Tanda terima (ack) dilewati:
+     * jumlahnya banyak dan tidak berguna bagi yang menyusul, jangan sampai menghabiskan jatah pesan sungguhan.
+     */
+    fun recent(cid: String, limit: Int, includeAck: Boolean = false): List<ByteArray> {
         val out = ArrayList<ByteArray>()
+        // includeAck: Mode Jembatan butuh tanda terkirim/dibaca untuk riwayat di klien web
+        val skip = if (includeAck) "-1" else Env.T_ACK.toString()
         readableDatabase.rawQuery(
-            "SELECT blob FROM relay WHERE cid=? AND expires>? ORDER BY ts ASC LIMIT ?",
-            arrayOf(cid, System.currentTimeMillis().toString(), limit.toString())
+            "SELECT blob FROM (SELECT blob, ts FROM relay WHERE cid=? AND expires>? AND type<>? ORDER BY ts DESC LIMIT ?) ORDER BY ts ASC",
+            arrayOf(cid, System.currentTimeMillis().toString(), skip, limit.toString())
         ).use { while (it.moveToNext()) out.add(it.getBlob(0)) }
         return out
     }

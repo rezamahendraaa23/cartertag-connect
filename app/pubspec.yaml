@@ -1,7 +1,7 @@
 name: cartertag_connect
 description: "CarterTag Connect: komunikasi lapangan driver dan panitia, online + mesh offline."
 publish_to: 'none'
-version: 1.4.0+12
+version: 1.5.0+13
 
 environment:
   sdk: '>=3.8.0 <4.0.0'

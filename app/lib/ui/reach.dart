@@ -277,6 +277,15 @@ class _ReachPanelState extends State<ReachPanel> {
     final h = Hub.i;
     final c = CT.of(context);
     final m = h.member(p.memberId);
+    if (p.via == 'wifi') {
+      // Wi-Fi posko: tersambung lewat router yang sama (tidak ada RSSI per HP)
+      return ListTile(
+        minTileHeight: 56,
+        leading: Icon(LucideIcons.wifi, color: c.ok),
+        title: Text(m?.displayName ?? 'HP tim', maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: const Text('Tersambung lewat Wi-Fi posko'),
+      );
+    }
     final r = p.rssiSmooth;
     final lvl = r == null ? 0 : signalLevel(r, h.reachWeak);
     final tr = _trend(p);
@@ -492,7 +501,8 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
     super.dispose();
   }
 
-  Peer? get _anchorPeer => anchor == null ? null : peers.where((p) => p.memberId == anchor).firstOrNull;
+  // kalibrasi mengukur jangkauan Bluetooth: abaikan sambungan lewat Wi-Fi posko
+  Peer? get _anchorPeer => anchor == null ? null : peers.where((p) => p.memberId == anchor && p.via != 'wifi').firstOrNull;
 
   /// Jarak saya ke HP pusat dari GPS (posisi pusat = lokasi terakhir yang dibagikannya; pusat diam, jadi cukup).
   Future<double?> _dist() async {
@@ -557,7 +567,7 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
   Widget build(BuildContext context) {
     final h = Hub.i;
     final c = CT.of(context);
-    final linked = peers.where((p) => p.connected && p.memberId.isNotEmpty).toList();
+    final linked = peers.where((p) => p.connected && p.memberId.isNotEmpty && p.via != 'wifi').toList();
     final ap = _anchorPeer;
     final cur = ap?.connected == true ? ap!.rssiSmooth : null;
     final w = _weak, r = _radius;

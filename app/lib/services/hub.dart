@@ -189,7 +189,8 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     return Link.isolated;
   }
 
-  int get meshPeers => Mesh.i.peers.where((p) => p.connected).length;
+  /// Jumlah HP tim tersambung (unik per anggota: tersambung lewat Bluetooth & Wi-Fi posko sekaligus dihitung sekali).
+  int get meshPeers => {for (final p in Mesh.i.peers) if (p.connected) p.memberId.isNotEmpty ? p.memberId : p.addr}.length;
   List<Peer> get meshPeersList => Mesh.i.peers;
 
   /// Status anggota untuk ditampilkan: online / dekat (Bluetooth) / terakhir online.
