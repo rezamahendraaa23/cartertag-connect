@@ -80,6 +80,7 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener, LanMesh.
         }
         uiForeground = MeshBus.netFg && MeshBus.sink != null
         worker.postDelayed(reachTask, 3_000)
+        worker.postDelayed(invTask, 150_000)
         val f = android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(btReceiver, f, Context.RECEIVER_NOT_EXPORTED) else registerReceiver(btReceiver, f)
     }
@@ -114,6 +115,8 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener, LanMesh.
         if (cfg?.cid != c.cid || cfg?.mid != c.mid) {
             ble.stop()
             cfg = c
+            visibleCh = emptySet()
+            loadVisibleChannels()
             try {
                 ble.start(Env.unhex(c.cid), Random.nextBytes(4))
             } catch (e: SecurityException) {
@@ -148,7 +151,8 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener, LanMesh.
         override fun run() {
             try {
                 val now = System.currentTimeMillis()
-                val linked = if (ble.isRunning) ble.links.values.toList() else emptyList()
+                // hanya link HP tim yang siap & masih hidup (bukan jam tangan BLE / link mati yang belum dibuang)
+                val linked = if (ble.isRunning) ble.links.values.filter { it.ready && (!it.pings || now - it.lastSeen < 35_000) } else emptyList()
                 val evidence = linked.map { it.memberId to ble.freshRssi(it, now) } +
                     // HP tim yang masih terlihat di scan (belum/sedang sambung ulang) = masih dalam jangkauan
                     (if (ble.isRunning) ble.seenNodes.entries
@@ -160,6 +164,7 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener, LanMesh.
                 // UI mati melewati 06.00: "hari konser aktif" kedaluwarsa sendiri
                 if (reach.active && activeDay != today()) reach.active = false
                 val changed = reach.tick(evidence, cfg?.names ?: emptyMap(), btOn)
+                if (lan.connected) reach.checkWifiTrap() else reach.wifiTrapSince = 0L
                 // UI di latar: kirim hanya kalau berubah (Dart tidak perlu bangun tiap 3 dtk saat layar mati)
                 if (uiForeground) emitPeers()
                 if (changed || uiForeground) MeshBus.emitReach(reachState())
@@ -226,6 +231,36 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener, LanMesh.
         }
     }
 
+    /** Inventaris dipecah per 200 id (MTU kecil: satu kiriman maks ±3,8 KB, 400 id = 6,4 KB tidak akan terkirim). */
+    private fun sendInventory(link: BleMesh.Link, ids: List<String>) {
+        ids.chunked(200).forEach { part -> link.send(BleMesh.K_INV, part.fold(ByteArray(0)) { acc, h -> acc + Env.unhex(h) }) }
+    }
+
+    /** Jaring pengaman tiap 2,5 mnt: 50 id terbaru ke tiap link siap (potongan yang hilang di udara / pesan yang terlewat tersusul). */
+    private val invTask = object : Runnable {
+        override fun run() {
+            try {
+                val c = cfg
+                if (c != null && ble.isRunning) {
+                    val ids = store.inventory(c.cid, 50, newest = true)
+                    if (ids.isNotEmpty()) ble.links.values.forEach { if (it.ready) sendInventory(it, ids) }
+                }
+            } catch (_: Exception) {}
+            worker.postDelayed(this, 150_000)
+        }
+    }
+
+    /** Hash channel yang boleh ditampilkan HP ini (dari Flutter). Kosong = belum dikirim (perilaku lama: semua). */
+    @Volatile private var visibleCh: Set<String> = emptySet()
+    fun setVisibleChannels(list: List<String>) { visibleCh = list.toSet() }
+
+    /** Daftar tersimpan, hanya kalau milik konser yang sedang jalan (hash channel beda per konser). */
+    private fun loadVisibleChannels() {
+        val p = getSharedPreferences("ct_vis", Context.MODE_PRIVATE)
+        val c = cfg ?: return
+        if (p.getString("cid", "") == c.cid) visibleCh = p.getStringSet("list", emptySet())?.toSet() ?: emptySet()
+    }
+
     // ------------------------------------------------------------ API dari Flutter
 
     /** Envelope buatan HP ini (sudah ditandatangani & dienkripsi di Dart). */
@@ -235,7 +270,7 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener, LanMesh.
         synchronized(seen) { seen[id] = System.currentTimeMillis() }
         if (env.type != Env.T_LOC) store.put(env)
         ble.broadcast(BleMesh.K_ENV, bytes)
-        lan.send(LanMesh.K_ENV, bytes)
+        lan.sendEnv(bytes)
         bridge?.clients?.values?.forEach { if (it.approved) it.binary(bytes) }
     }
 
@@ -314,7 +349,10 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener, LanMesh.
             val delay = if (env.prio >= 2) Random.nextLong(10, 80) else Random.nextLong(50, 300)
             worker.postDelayed({ ble.broadcast(BleMesh.K_ENV, out, except = from) }, delay)
             // Bluetooth -> Wi-Fi posko (yang datang dari Wi-Fi sudah diterima semua HP di Wi-Fi itu)
-            if (!fromLan) worker.postDelayed({ lan.send(LanMesh.K_ENV, out) }, delay)
+            if (!fromLan) worker.postDelayed({
+                // HP posko lain sudah menyiarkannya ke Wi-Fi selama jeda: tidak perlu lagi
+                if (synchronized(lanHeard) { !lanHeard.containsKey(id) }) lan.sendEnv(out)
+            }, delay)
         }
     }
 
@@ -336,8 +374,7 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener, LanMesh.
             val c = cfg ?: return@post
             link.send(BleMesh.K_HELLO, c.mid.toByteArray(Charsets.US_ASCII))
             link.send(BleMesh.K_NODE, Env.unhex(ble.nodeHex))
-            val inv = store.inventory(c.cid, 400)
-            if (inv.isNotEmpty()) link.send(BleMesh.K_INV, inv.fold(ByteArray(0)) { acc, h -> acc + Env.unhex(h) })
+            sendInventory(link, store.inventory(c.cid, 400))
             emitPeers()
         }
     }
@@ -388,7 +425,17 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener, LanMesh.
 
     // ---- LanMesh.Listener (dipanggil dari thread socket; pindah ke worker)
 
-    override fun onLanEnvelope(bytes: ByteArray, fromIp: String) { worker.post { accept(bytes, null, null, fromLan = true) } }
+    override fun onLanEnvelope(bytes: ByteArray, fromIp: String, handoff: Boolean) {
+        worker.post {
+            val env = Env.parse(bytes)
+            val h = env?.idHex
+            // serah-terima: yang baru bagi leader diteruskan ke HP posko lain (pengirimnya hanya mengirim ke leader)
+            val fresh = handoff && h != null && !(synchronized(seen) { seen.containsKey(h) } || store.has(h))
+            if (h != null) synchronized(lanHeard) { lanHeard[h] = System.currentTimeMillis() }
+            accept(bytes, null, null, fromLan = true)
+            if (fresh && store.has(h!!)) lan.sendEnvExcept(bytes, fromIp)
+        }
+    }
 
     /** node Wi-Fi -> kapan terakhir disusulkan (cegah kirim ulang saat dia hilang-muncul karena hello terlewat). */
     private val lanSynced = ConcurrentHashMap<String, Long>()
@@ -398,18 +445,63 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener, LanMesh.
      * (node terkecil di Wi-Fi ini), lewat unicast ke HP itu (Wi-Fi mengulang unicast yang gagal; broadcast tidak),
      * paling sering sekali per 10 mnt per HP. Tanpa ini setiap HP menyiarkan 150 pesan sekaligus dan router tersumbat.
      */
-    override fun onLanPeerNew(node: String, ip: String) {
-        // (lihat isSyncLeader / lanSynced)
+    /** Waktu susulan Wi-Fi terakhir (batas global: hello palsu dengan node acak tidak bisa memicu banjir). */
+    private val lanSyncTimes = ArrayDeque<Long>()
+
+    override fun onLanPeerNew(node: String, ip: String, goneAt: Long) = lanSync(node, ip, goneAt, 0)
+
+    /** node -> goneAt terkecil yang sedang menunggu dicoba ulang (satu rantai retry per HP). */
+    private val pendingSync = ConcurrentHashMap<String, Long>()
+
+    private fun lanSync(node: String, ip: String, goneAt0: Long, attempt: Int) {
         worker.post {
             val c = cfg ?: return@post
+            val peer = lan.peers[node] ?: run { pendingSync.remove(node); return@post }   // sudah pergi lagi
             val now = System.currentTimeMillis()
-            if (now - (lanSynced[node] ?: 0L) < 10 * 60_000) return@post
-            if (!lan.isSyncLeader(node)) return@post
+            // retry yang menunggu: gabungkan (ambil yang paling awal; 0 = HP baru -> 150 terbaru)
+            val queued = pendingSync[node]
+            if (attempt == 0 && queued != null) { if (goneAt0 < queued) pendingSync[node] = goneAt0; return@post }
+            val goneAt = if (attempt > 0) pendingSync.remove(node) ?: goneAt0 else goneAt0
+            // ditolak sementara: coba lagi nanti (dulu dibuang -> pesan di jeda itu hilang permanen)
+            fun retry(ms: Long) {
+                if (attempt >= 4) return
+                pendingSync[node] = goneAt
+                worker.postDelayed({ lanSync(node, peer.ip, goneAt, attempt + 1) }, ms + Random.nextLong(0, 3_000))
+            }
+            // anti putus-sambung: paling sering sekali per 60 dtk per HP
+            val wait = 60_000 - (now - (lanSynced[node] ?: 0L))
+            if (wait > 0) { retry(wait); return@post }
+            if (!lan.isSyncLeader(node)) { retry(12_000); return@post }
+            // hello dari anggota yang tidak dikenal (node acak palsu): batas global supaya tidak bisa memicu banjir
+            if (c.names.isNotEmpty() && !c.names.containsKey(peer.mid)) {
+                while (lanSyncTimes.isNotEmpty() && now - lanSyncTimes.first() > 10 * 60_000) lanSyncTimes.removeFirst()
+                if (lanSyncTimes.size >= 8) return@post
+                lanSyncTimes.addLast(now)
+            }
             lanSynced[node] = now
-            val list = store.recent(c.cid, 150)
+            lan.syncedGone(node)
+            // kembali setelah hilang: cukup pesan sejak dia hilang (−30 dtk); HP baru: 150 terbaru
+            val list = if (goneAt > 0) store.since(c.cid, goneAt - 30_000, 150) else store.recent(c.cid, 150)
             // dicicil supaya router & thread router mesh tidak tersumbat
-            list.forEachIndexed { i, b -> worker.postDelayed({ lan.sendTo(ip, LanMesh.K_ENV, b) }, i * 15L) }
+            list.forEachIndexed { i, b -> worker.postDelayed({ lan.sendTo(peer.ip, LanMesh.K_ENV, b) }, i * 15L) }
         }
+    }
+
+    /** HP ini baru masuk Wi-Fi posko: serahkan pesan yang dibawanya (mis. dari tim yang jauh) ke HP posko (leader meneruskan). */
+    override fun onLanSettled(leaderIp: String, closedAt: Long) {
+        worker.post {
+            val c = cfg ?: return@post
+            // sesi ulang (router reboot / putus sebentar): cukup sejak socket lama ditutup; jeda acak supaya tidak serentak
+            val list = if (closedAt > 0) store.since(c.cid, closedAt - 30_000, 100) else store.recent(c.cid, 100)
+            val jitter = Random.nextLong(0, 5_000)
+            val kind = lan.handoffKind(leaderIp)   // leader HP 1.5 tidak mengenal K_HANDOFF
+            list.forEachIndexed { i, b -> worker.postDelayed({ lan.sendTo(leaderIp, kind, b) }, jitter + i * 15L) }
+        }
+    }
+
+    /** id yang sudah terdengar lewat Wi-Fi: relay Bluetooth -> Wi-Fi dilewati (cegah N HP posko menyiarkan pesan yang sama). */
+    private val lanHeard = object : LinkedHashMap<String, Long>(512, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?) = size > 2_000
     }
 
     override fun onLanPeersChanged() { worker.post { emitPeers() } }
@@ -507,6 +599,8 @@ class MeshService : Service(), BleMesh.Listener, BridgeServer.Listener, LanMesh.
                 nm.notify(7, n)
             }
             Env.T_CHAT, Env.T_ANN, Env.T_ROLLCALL -> {
+                // chat grup mobil lain / DM orang lain yang hanya diteruskan HP ini: tetap disimpan, tanpa notifikasi
+                if (env.type == Env.T_CHAT && visibleCh.isNotEmpty() && env.chHex !in visibleCh) return
                 val (title, text) = when (env.type) {
                     Env.T_ANN -> "Pengumuman baru" to "Dari $name"
                     Env.T_ROLLCALL -> "Absen dari $name" to "Tandai kondisimu"

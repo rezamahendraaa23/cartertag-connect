@@ -155,6 +155,14 @@ class Mesh {
     } catch (_) {}
   }
 
+  /// Hash channel yang boleh ditampilkan HP ini: service memberi notifikasi (UI tertutup) hanya untuk channel ini.
+  Future<void> setVisibleChannels(List<String> hashes, {String cid = ''}) async {
+    if (!supported) return;
+    try {
+      await _m.invokeMethod('channels', {'list': hashes, 'cid': cid});
+    } catch (_) {}
+  }
+
   /// Status internet nyata (Firebase) + app di layar. Service memakainya untuk mendiamkan peringatan hanya saat benar-benar online.
   /// [online] null = belum tahu (Firebase masih menyambung): service memakai status lamanya, layar tetap dilaporkan.
   Future<void> setNet({required bool? online, required bool foreground}) async {

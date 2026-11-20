@@ -45,20 +45,34 @@ class RelayStore(ctx: Context) : SQLiteOpenHelper(ctx, "ct_mesh.db", null, 1) {
 
     /** id envelope terbaru untuk konser ini (inventaris yang ditawarkan ke peer baru). */
     @Synchronized
-    fun inventory(cid: String, limit: Int): List<String> {
+    /** newest=true (inventaris berkala): pesan terbaru dulu tanpa ACK, supaya SOS/event prio tinggi tidak memenuhi slot berjam-jam. */
+    fun inventory(cid: String, limit: Int, newest: Boolean = false): List<String> {
         val out = ArrayList<String>()
+        val order = if (newest) "ts DESC" else "prio DESC, ts DESC"
+        val skip2 = if (newest) Env.T_ACK.toString() else Env.T_LOC.toString()
         readableDatabase.rawQuery(
-            "SELECT id FROM relay WHERE cid=? AND expires>? AND type<>? ORDER BY prio DESC, ts DESC LIMIT ?",
-            arrayOf(cid, System.currentTimeMillis().toString(), Env.T_LOC.toString(), limit.toString())
+            "SELECT id FROM relay WHERE cid=? AND expires>? AND type<>? AND type<>? ORDER BY $order LIMIT ?",
+            arrayOf(cid, System.currentTimeMillis().toString(), Env.T_LOC.toString(), skip2, limit.toString())
         ).use { while (it.moveToNext()) out.add(it.getString(0)) }
         return out
     }
 
+    /** Envelope yang diterima HP ini sejak [fromTs] (maks [limit] terbaru, urut lama -> baru), tanpa ack. */
     @Synchronized
+    fun since(cid: String, fromTs: Long, limit: Int): List<ByteArray> {
+        val out = ArrayList<ByteArray>()
+        readableDatabase.rawQuery(
+            "SELECT blob FROM (SELECT blob, ts FROM relay WHERE cid=? AND expires>? AND ts>=? AND type<>? ORDER BY ts DESC LIMIT ?) ORDER BY ts ASC",
+            arrayOf(cid, System.currentTimeMillis().toString(), fromTs.toString(), Env.T_ACK.toString(), limit.toString())
+        ).use { while (it.moveToNext()) out.add(it.getBlob(0)) }
+        return out
+    }
+
     /**
      * [limit] envelope TERBARU (dikirim urut lama -> baru) untuk HP yang baru bergabung. Tanda terima (ack) dilewati:
      * jumlahnya banyak dan tidak berguna bagi yang menyusul, jangan sampai menghabiskan jatah pesan sungguhan.
      */
+    @Synchronized
     fun recent(cid: String, limit: Int, includeAck: Boolean = false): List<ByteArray> {
         val out = ArrayList<ByteArray>()
         // includeAck: Mode Jembatan butuh tanda terkirim/dibaca untuk riwayat di klien web

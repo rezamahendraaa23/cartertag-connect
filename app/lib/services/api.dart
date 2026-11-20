@@ -52,7 +52,10 @@ class ApiError implements Exception {
   final String code;
   final String message;
   bool get isNetwork => code == 'network';
-  bool get isAuth => code == 'auth' || code == 'removed' || code == 'left';
+  bool get isAuth => code == 'auth' || isKick;
+
+  /// Sesi sudah tidak sah untuk selamanya: kode diperbarui, tim ditutup, dikeluarkan, atau sudah keluar.
+  bool get isKick => code == 'reset' || code == 'closed' || code == 'removed' || code == 'left';
   @override
   String toString() => message;
 }

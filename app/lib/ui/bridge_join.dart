@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../core/theme.dart';
+import '../data/models.dart';
 import '../services/bridge_client.dart';
 import '../services/hub.dart';
 import 'widgets.dart';
@@ -56,7 +57,7 @@ class _BridgeJoinScreenState extends State<BridgeJoinScreen> {
       waiting = true;
       error = null;
     });
-    Bridge.i.hello({'token': Bridge.i.urlToken, 'n': name.text.trim(), 'car': car.text.trim(), 'px': Hub.i.keys.pubXb64, 'pe': Hub.i.keys.pubEdB64});
+    Bridge.i.hello({'token': Bridge.i.urlToken, 'n': name.text.trim(), 'car': carDigits(car.text), /* "C3" / "Mobil 3" -> "3": satu grup mobil, cocok dengan manifest */ 'px': Hub.i.keys.pubXb64, 'pe': Hub.i.keys.pubEdB64});
   }
 
   @override

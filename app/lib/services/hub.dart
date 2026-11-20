@@ -133,7 +133,17 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     if (code == null || code.isEmpty) throw ApiError('code', 'Kode konser tidak tersimpan. Keluar lalu gabung lagi pakai link / kode.');
     final old = me.car;
     final mine = await myCheckinsOnCar(old);
-    await join(kode: code, nama: me.name, car: car, hp: me.hp);
+    try {
+      await join(kode: code, nama: me.name, car: car, hp: me.hp);
+    } on ApiError catch (e) {
+      // kode sudah diperbarui / tim ditutup: keluar otomatis, bukan sekadar "gagal ganti mobil"
+      if (e.isKick || e.code == 'kode') {
+        await _kicked(c.slug, e.code == 'kode' ? _resetMsg : e.message);
+        // UI tidak boleh menampilkan "berhasil ganti mobil": layar sudah ditutup & pesan kick tampil di layar awal
+        throw ApiError('cancel', 'Dibatalkan.');
+      }
+      rethrow;
+    }
     // centang penumpang yang terlanjur diisi di mobil yang salah dikosongkan (status 'batal' = belum), supaya driver & koordinator
     // mobil itu tidak mengira penumpangnya sudah naik
     for (final r in mine) {
@@ -211,21 +221,54 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     await _flushOutbox();
   }
 
-  /// Channel yang terlihat untuk role saya (PRD Sistem M2.1).
+  /// Nomor mobil saya (driver).
+  List<String> get myCars => me.cars.isNotEmpty ? me.cars : [if (me.car.isNotEmpty) me.car];
+
+  /// Mobil yang punya grup: mobil dengan driver yang sudah login, urut nomor.
+  List<String> get carGroups => carsMap.keys.toList()..sort((a, b) => (int.tryParse(carDigits(a)) ?? 999).compareTo(int.tryParse(carDigits(b)) ?? 999));
+
+  /// Channel yang terlihat untuk role saya: grup konser (semua), grup mobil (driver: mobilnya saja; koordinator: semua mobil
+  /// yang drivernya sudah login), grup koordinator, dan chat pribadi (di daftar terpisah).
   List<Channel> channels() {
     final c = concert;
     if (c == null) return const [];
     final out = <Channel>[Channel('g', 'Grup Konser', subtitle: 'Semua anggota')];
-    final areas = c.areas;
     if (me.isDriver) {
-      if (me.area.isNotEmpty) out.add(Channel('a:${me.area}', 'Area ${me.area}', subtitle: 'Driver & koordinator area ini'));
-    } else {
-      for (final a in areas) {
-        out.add(Channel('a:$a', 'Area $a', subtitle: 'Driver & koordinator area ini'));
+      for (final car in myCars) {
+        out.add(Channel('c:$car', 'Grup ${carName(car)}', subtitle: 'Kamu & koordinator'));
       }
+    } else {
+      // grup koordinator di atas, tidak tenggelam di bawah puluhan grup mobil
       out.add(Channel('k', 'Koordinator', subtitle: 'Koordinator & panitia'));
+      final cars = carsMap;
+      for (final car in carGroups) {
+        out.add(Channel('c:$car', 'Grup ${carName(car)}', subtitle: cars[car]?.displayName ?? 'Driver & koordinator'));
+      }
     }
     return out;
+  }
+
+  /// Anggota sebuah channel (untuk jumlah anggota, daftar penerima, saran @tag).
+  List<Member> membersOf(String ch) {
+    final all = roster;
+    if (ch.startsWith('d:')) {
+      final parts = ch.split(':');
+      return all.where((m) => parts.contains(m.id)).toList();
+    }
+    bool hasCar(Member m, String car) => (m.cars.isNotEmpty ? m.cars : [m.car]).contains(car);
+    if (ch.startsWith('c:')) return all.where((m) => !m.isDriver || hasCar(m, ch.substring(2))).toList();
+    if (ch == 'k') return all.where((m) => !m.isDriver).toList();
+    if (ch.startsWith('a:')) return all.where((m) => !m.isDriver || m.area == ch.substring(2)).toList();
+    return all;
+  }
+
+  /// Boleh membaca / menampilkan channel ini? Pesan grup lain tetap diteruskan (relay), hanya tidak ditampilkan.
+  bool canSee(String ch) {
+    if (ch == 'g' || ch.startsWith('d:')) return true;
+    if (!me.isDriver) return true;
+    if (ch.startsWith('c:')) return myCars.contains(ch.substring(2));
+    if (ch.startsWith('a:')) return me.area == ch.substring(2); // grup area lama (app < 1.6)
+    return false;
   }
 
   Channel channelById(String id) {
@@ -238,6 +281,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     for (final ch in channels()) {
       if (ch.id == id) return ch;
     }
+    if (id.startsWith('c:')) return Channel(id, 'Grup ${carName(id.substring(2))}', subtitle: 'Driver & koordinator');
     if (id.startsWith('a:')) return Channel(id, 'Area ${id.substring(2)}');
     return Channel(id, id == 'k' ? 'Koordinator' : 'Grup Konser');
   }
@@ -250,6 +294,8 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       appVersion = (await PackageInfo.fromPlatform()).version;
     } catch (_) {}
     WidgetsBinding.instance.addObserver(this);
+    Online.i.onDenied = onOnlineDenied;
+    kickNotice = await s.get<String>('kick_notice');
     _subs.add(Connectivity().onConnectivityChanged.listen((r) {
       final up = r.any((x) => x != ConnectivityResult.none);
       if (up && !netUp) _onNetworkBack();
@@ -291,7 +337,13 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     }
     final fcm = await Online.i.fcmToken();
     final code = kode.toUpperCase().replaceAll(RegExp(r'^CT-?'), '').replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    // bukti pemilik kunci perangkat: server menolak orang lain yang memakai pub_ed saya dari roster
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    final sig = base64Encode(await keys.sign(Uint8List.fromList(utf8.encode('ctjoin|$code|$ts|${keys.pubXb64}'))));
+    final gen = _gen;
     final b = await Api.call('join', {
+      'ts': ts,
+      'sig': sig,
       'kode': code,
       'nama': nama,
       'car': car.trim(),
@@ -302,7 +354,10 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       'platform': kIsWeb ? 'web' : 'android',
       'app_version': appVersion,
     });
+    // selama menunggu server user keluar / dikeluarkan (mis. verifikasi undangan di belakang): jangan hidupkan lagi
+    if (gen != _gen || _leaving) throw ApiError('cancel', 'Dibatalkan.');
     final c = Concert(b);
+    await _clearKick();
     await _dropPendingLeave(c.slug);
     await s.concerts.record(c.slug).put(s.db, b);
     await s.put('active', c.slug);
@@ -332,6 +387,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       'manifest': {'enabled': false, 'rows': []},
       'unverified': true,
     };
+    await _clearKick();
     await s.concerts.record(slugQ).put(s.db, b);
     await s.put('active', slugQ);
     await s.put('car_$slugQ', car.trim());
@@ -344,6 +400,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
   /// Dipakai klien web Mode Jembatan: bundle dari HP Android host.
   Future<Concert> joinFromBridge(Map<String, dynamic> bundle) async {
     final c = Concert(bundle);
+    await _clearKick();
     await s.concerts.record(c.slug).put(s.db, bundle);
     await s.put('active', c.slug);
     await _activate(c);
@@ -360,6 +417,11 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     }
     try {
       final b = await Api.call('refresh', {'member_token': c.token, 'fcm_token': await Online.i.fcmToken() ?? '', 'app_version': appVersion});
+      // selama menunggu server: keluar / ganti konser / ganti mobil -> jawaban ini basi, jangan menghidupkan lagi konser lama
+      final cur = concert;
+      if (_leaving || cur == null || cur.slug != c.slug || cur.token != c.token) return;
+      final st = (b['server_time'] as num?)?.toInt() ?? 0, curSt = (cur.b['server_time'] as num?)?.toInt() ?? 0;
+      if (st != 0 && st < curSt) return;
       await s.concerts.record(c.slug).put(s.db, b);
       concert = Concert(b);
       _pruneProfiles();
@@ -374,13 +436,30 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       // refresh berhasil = internet sungguhan (bukan Wi-Fi tanpa internet): kirim pemberitahuan keluar yang tertunda
       unawaited(_flushPendingLeaves());
     } on ApiError catch (e) {
-      if (e.isAuth) {
+      // jawaban untuk token lama (user sudah keluar & gabung lagi selama menunggu): abaikan
+      if (concert?.token != c.token) return;
+      if (e.isKick) {
+        await _kicked(c.slug, e.message);
+      } else if (e.isAuth) {
         lastError = e.message;
         notifyListeners();
       }
     } catch (e) {
       debugPrint('refresh gagal: $e');
     }
+  }
+
+  DateTime _deniedRefreshAt = DateTime(2000);
+  int _deniedBackoff = 120;
+
+  /// Firebase menolak baca/tulis (kode diperbarui / tim ditutup / dikeluarkan): tanya server.
+  /// Jeda bertingkat 2 -> 4 -> 8 ... 30 menit: kalau rules & server tidak sepakat, jangan membanjiri server tiap 2 menit.
+  void onOnlineDenied() {
+    final now = DateTime.now();
+    if (concert == null || now.difference(_deniedRefreshAt).inSeconds < _deniedBackoff) return;
+    _deniedRefreshAt = now;
+    _deniedBackoff = min(1800, _deniedBackoff * 2);
+    unawaited(refresh());
   }
 
   String? lastError;
@@ -391,7 +470,11 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     try {
       await join(kode: code, nama: me.name, car: (await s.get<String>('car_$slug')) ?? me.car);
     } on ApiError catch (e) {
-      if (!e.isNetwork) {
+      final sl = slug;
+      // kode undangan sudah tidak berlaku (diperbarui / tim ditutup): keluar otomatis
+      if (e.isKick || e.code == 'kode') {
+        await _kicked(sl, e.code == 'kode' ? _resetMsg : e.message);
+      } else if (!e.isNetwork && e.code != 'cancel') {
         lastError = e.message;
         notifyListeners();
       }
@@ -401,6 +484,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> switchTo(String slugTo) async {
     final b = await s.concerts.record(slugTo).get(s.db);
     if (b == null) return;
+    _gen++;
     await s.put('active', slugTo);
     await _activate(Concert(Map<String, dynamic>.from(b)));
   }
@@ -458,6 +542,69 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
         ..add({'s': sl, 'm': mid, 't': token, 'at': at, 'now': true});
       await s.put('pending_leaves', jsonEncode(pend));
     }
+    await _clearKick();
+    await _wipeLocal(sl);
+    unawaited(_flushPendingLeaves());
+    return reached;
+  }
+
+  /// Pesan untuk layar Gabung setelah dikeluarkan otomatis (kode diperbarui / tim ditutup / dikeluarkan). Disimpan: tetap
+  /// tampil walau app ditutup paksa sebelum sempat dibaca.
+  String? kickNotice;
+
+  static const _resetMsg = 'Kode konser sudah diperbarui koordinator. Gabung lagi pakai kode / link yang baru.';
+
+  /// Dipasang UI: tutup semua layar (chat, profil, dialog) SEBELUM data dihapus, supaya tidak ada layar yang membaca konser kosong.
+  void Function()? onKick;
+
+  Future<void> _clearKick() async {
+    final had = kickNotice != null;
+    kickNotice = null;
+    await s.put('kick_notice', null);
+    if (had) notifyListeners();
+  }
+
+  /// Pesan kick sudah dibaca (tombol "Gabung lagi").
+  Future<void> dismissKick() => _clearKick();
+
+  /// Naik setiap data konser dihapus: jawaban join yang tiba sesudahnya dibuang.
+  int _gen = 0;
+
+  /// Server bilang sesi ini sudah tidak sah: keluar lokal tanpa kabar ke server (server sendiri yang memutus).
+  Future<void> _kicked(String sl, String msg) async {
+    if (_leaving || concert?.slug != sl) return;
+    _leaving = true;
+    Online.i.leaving = true;
+    try {
+      _helloTimer?.cancel();
+      _sosTimer?.cancel();
+      LocationSvc.i.setSosMode(false);
+      LocationSvc.i.stop();
+      await _dropPendingLeave(sl);
+      kickNotice = msg;
+      lastError = null;
+      await s.put('kick_notice', msg);
+      onKick?.call();
+      await Future.delayed(const Duration(milliseconds: 450)); // animasi tutup layar selesai dulu
+      await _wipeLocal(sl);
+      onKick?.call(); // layar yang sempat dibuka selama jeda di atas
+      unawaited(_flushPendingLeaves()); // lepas langganan topik push konser ini
+    } catch (e) {
+      debugPrint('kick gagal: $e');
+      // gagal di tengah (teardown sudah jalan): jangan tertinggal di konser setengah mati
+      concert = null;
+      try {
+        await s.put('active', null);
+      } catch (_) {}
+      notifyListeners();
+    } finally {
+      _leaving = false;
+      Online.i.leaving = false;
+    }
+  }
+
+  Future<void> _wipeLocal(String sl) async {
+    _gen++;
     await _teardown();
     final f = Finder(filter: Filter.equals('slug', sl));
     for (final st in [s.messages, s.outbox, s.anns, s.rollcalls, s.fleet, s.checkins, s.sos, s.locations, s.reports]) {
@@ -474,10 +621,8 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     mySosId = null;
     concert = null;
     unawaited(_writeMyIds());
-    await s.put('pending_unsub', true); // dilepas oleh _retryUnsub di _flushPendingLeaves di bawah
+    await s.put('pending_unsub', true); // dilepas oleh _retryUnsub di _flushPendingLeaves
     notifyListeners();
-    unawaited(_flushPendingLeaves());
-    return reached;
   }
 
   Future<List<Map<String, dynamic>>> _pendingLeaves() async {
@@ -503,6 +648,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Lepas konser aktif (data tetap tersimpan) supaya layar Gabung tampil untuk konser lain.
   Future<void> detachForNewJoin() async {
+    _gen++; // verifikasi undangan yang masih menunggu server tidak boleh mengaktifkan konser itu lagi
     await _teardown();
     concert = null;
     await s.put('active', null);
@@ -529,13 +675,21 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     final c = concert!;
     _cid = await concertCid(c.slug);
     _groupKey = SecretKey(base64Decode(c.groupKey));
-    _chByHash.clear();
     // DM juga untuk anggota yang sedang disembunyikan: kalau dia gabung lagi, pesannya tetap terbaca
     final all = <String>{for (final m in c.roster) m.id, ..._extraRoster.keys}..remove(c.me.id);
-    final ids = <String>{'g', 'k', for (final a in c.areas) 'a:$a', for (final mid in all) dmChannel(c.me.id, mid)};
+    final cars = <String>{...carsMap.keys, ...myCars, for (final r in c.manifest) if (r.car.isNotEmpty) r.car};
+    final ids = <String>{'g', 'k', for (final a in c.areas) 'a:$a', for (final car in cars) 'c:$car', for (final mid in all) dmChannel(c.me.id, mid)};
+    // bangun dulu di peta baru lalu tukar sekaligus: DM yang tiba selama ratusan await tidak menemukan peta kosong & hilang
+    final m = <String, String>{};
     for (final id in ids) {
-      _chByHash[hex(await channelHash(c.slug, id))] = id;
+      m[hex(await channelHash(c.slug, id))] = id;
     }
+    if (concert?.slug != c.slug) return;
+    _chByHash
+      ..clear()
+      ..addAll(m);
+    // notifikasi native (UI tertutup) hanya untuk channel yang boleh saya lihat
+    unawaited(Mesh.i.setVisibleChannels([for (final e in m.entries) if (canSee(e.value)) e.key], cid: hex(_cid)));
   }
 
   /// stopMesh=false saat mengaktifkan konser: service mesh tetap hidup (MeshService sendiri mengganti konser kalau cid berubah),
@@ -556,6 +710,18 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     reachEvents.clear();
     _reachSent.clear();
     _myReachSt = 'idle';
+    // timer notify & ack konser lama tidak boleh jalan dengan token konser berikutnya
+    for (final t in _notifyTimers.values) {
+      t.cancel();
+    }
+    _notifyTimers.clear();
+    _notifyQueue.clear();
+    _ackTimer?.cancel();
+    _ackTimer = null;
+    _ackBuffer.clear();
+    _reportsBackoff = 0;
+    _reportsRetryAt = 0;
+    _helloOnline = false;
     try {
       await Online.i.detach();
     } catch (_) {}
@@ -568,6 +734,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _activate(Concert c) async {
+    _deniedBackoff = 120; // sesi baru: jeda penolakan Firebase mulai dari awal
     await _teardown(stopMesh: false);
     concert = c;
     final extra = await s.get<String>('extra_${c.slug}');
@@ -615,6 +782,12 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       if (up) {
         _flushOutbox();
         unawaited(_flushAnnDel());
+        // hello pertama sering terkirim sebelum Firebase tersambung (lalu dibuang): kirim sekali lagi lewat internet,
+        // supaya koordinator langsung mengenal driver baru (grup mobilnya muncul) tanpa menunggu 15 mnt
+        if (!_helloOnline) {
+          _helloOnline = true;
+          unawaited(_hello());
+        }
       }
       _pushNet();
       notifyListeners();
@@ -802,9 +975,11 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
         'type': type,
         'ch': channel,
         'prio': prio,
+        if (payload['op'] != null) 'op': '${payload['op']}',
       });
     }
-    await _dispatch(id, bytes, outboxed: type != EType.loc, meta: {'type': type, 'ch': channel, 'prio': prio, 'id': id});
+    await _dispatch(id, bytes, outboxed: type != EType.loc,
+        meta: {'type': type, 'ch': channel, 'prio': prio, 'id': id, if (payload['op'] != null) 'op': '${payload['op']}'});
     return id;
   }
 
@@ -814,7 +989,12 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     // lokasi tidak ditulis ke aliran pesan server (terlalu sering); jalur online-nya lewat presence (sendLocation)
     final isLoc = meta?['type'] == EType.loc;
     if (Online.i.connected && !isLoc) {
-      online = await Online.i.push(id, bytes, me.id);
+      _inFlight.add(id);
+      try {
+        online = await Online.i.push(id, bytes, me.id);
+      } finally {
+        _inFlight.remove(id);
+      }
       if (online && meta != null) _notifyServer(meta);
     }
     mesh = await Mesh.i.send(bytes);
@@ -884,11 +1064,16 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     });
   }
 
+  bool _helloOnline = false;
+
+  /// id yang sedang dikirim _dispatch (jangan di-push ulang oleh flush bersamaan -> push & notify dobel).
+  final _inFlight = <String>{};
+
   Future<void> _flushOutbox() async {
     if (_flushing || concert == null) return;
-    await _ensureMesh();
-    _flushing = true;
+    _flushing = true; // dipasang sebelum await: dua flush tidak boleh jalan bersamaan
     try {
+      await _ensureMesh();
       final all = await s.outbox.find(s.db, finder: Finder(filter: Filter.equals('slug', slug), sortOrders: [SortOrder('at')]));
       final now = DateTime.now().millisecondsSinceEpoch;
       // pesan & SOS saya dulu; titipan HP lain di belakang, maks 20 per putaran, berhenti di gagal pertama
@@ -910,6 +1095,12 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
           } else {
             relayFailed = true;
           }
+          continue;
+        }
+        if (_inFlight.contains(r.key)) continue;
+        // update lokasi SOS yang sudah basi (> 2 mnt) tidak perlu dikirim lagi: yang terbaru menyusul tiap 30 dtk
+        if (v['type'] == EType.sos && v['op'] == 'update' && now - ((v['at'] as num?)?.toInt() ?? now) > 120000) {
+          await s.outbox.record(r.key).delete(s.db);
           continue;
         }
         final bytes = base64Decode(v['env'] as String);
@@ -945,6 +1136,10 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     // tidak perlu push: lokasi, tanda terima, profil, check-in penumpang, status armada biasa (bukan kendala)
     if (type == EType.loc || type == EType.ack || type == EType.control || type == EType.checkin) return;
     if (type == EType.fleet && prio < Prio.high) return;
+    // SOS & absen: push hanya saat dimulai. Update lokasi SOS (tiap 30 dtk), respon, batal, jawaban absen tidak boleh
+    // membunyikan alarm "SOS dari ..." / "Absen dari ..." lagi di semua HP.
+    final op = v['op'];
+    if ((type == EType.sos || type == EType.rollcall) && op != null && op != 'start') return;
     final ch = '${v['ch']}';
     final key = '$ch|$prio|$type';
     (_notifyQueue[key] ??= []).add('${v['id'] ?? v['at']}');
@@ -1049,7 +1244,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     final p = {'car': car, 'leg': leg, 'st': status, 'note': note, 'eid': eid, 'at': now, 'lat': fix?.lat, 'lng': fix?.lng, 'by': me.id};
     await _applyFleet(p, me.id);
     await s.reports.record(eid).put(s.db, {'slug': slug, 'kind': 'fleet', 'event_id': eid, ...p, 'at_iso': DateTime.now().toIso8601String()});
-    await _send(EType.fleet, me.isDriver && me.area.isNotEmpty ? 'a:${me.area}' : 'g', p, prio: status == 'kendala' ? Prio.high : Prio.normal);
+    await _send(EType.fleet, me.isDriver && myCars.isNotEmpty ? 'c:${myCars.first}' : 'g', p, prio: status == 'kendala' ? Prio.high : Prio.normal);
     Online.i.mirror('fleet/${car}_$leg', {'st': status, 'note': note, 'by': me.id, 'name': me.name, 'at': now, 'lat': fix?.lat, 'lng': fix?.lng});
   }
 
@@ -1499,26 +1694,25 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
     s.seen.record(id).put(s.db, {'t': DateTime.now().millisecondsSinceEpoch});
   }
 
-  Future<bool> _isSeen(String id) async {
-    if (_seenMem.contains(id)) return true;
-    final hit = await s.seen.record(id).exists(s.db);
-    if (hit) _seenMem.add(id);
-    return hit;
-  }
-
   Future<void> receive(Uint8List bytes, String via) async {
     final c = concert;
     if (c == null || _groupKey == null) return;
     final env = Envelope.decode(bytes);
     if (env == null || !listEquals(env.cid, _cid)) return;
     final id = env.idHex;
-    if (await _isSeen(id)) return;
+    // tandai di memori SEBELUM await: envelope yang sama dari internet & Bluetooth bersamaan tidak diproses dua kali
+    if (_seenMem.contains(id)) return;
+    _seenMem.add(id);
+    if (await s.seen.record(id).exists(s.db)) return;
     _markSeen(id);
 
     // Gateway: pesan dari mesh/jembatan diteruskan ke server; pesan dari server diteruskan ke mesh/jembatan.
     if (via != 'online' && env.type != EType.loc) {
       if (Online.i.connected) {
-        unawaited(Online.i.push(id, bytes, env.from));
+        // gagal diteruskan (koneksi setengah mati): titipkan, dicoba lagi saat tersambung
+        unawaited(Online.i.push(id, bytes, env.from).then((ok) {
+          if (!ok && Online.i.ready && concert?.slug == c.slug) unawaited(_queueRelay(id, bytes, env));
+        }));
       } else if (Online.i.ready) {
         // internet HP ini sedang putus: simpan, teruskan begitu tersambung (pesan sudah ditandai terlihat, tidak akan datang lagi)
         unawaited(_queueRelay(id, bytes, env));
@@ -1544,7 +1738,7 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       key = _groupKey;
     }
     final p = await openBody(env.body, key!, env.aad);
-    if (p == null) return;
+    if (p == null || concert?.slug != c.slug) return; // keluar / ganti konser selama dekripsi
     var verified = false;
     if (sender != null && sender.pubEd.isNotEmpty) {
       verified = await DeviceKeys.verify(env.signedBytes, env.sig, base64Decode(sender.pubEd));
@@ -1554,6 +1748,8 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       if (!verified) return;
     }
     channel ??= '${p['ch'] ?? 'g'}';
+    // chat grup mobil lain (driver): sudah diteruskan di atas, tidak disimpan / tidak dinotifikasi
+    if (env.type == EType.chat && !canSee(channel)) return;
     final fromName = sender?.name ?? '${p['fn'] ?? 'Anggota'}';
 
     switch (env.type) {
@@ -1724,7 +1920,9 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       if (at <= leftAt) return; // hello lama (tersimpan di relay / riwayat) dari sebelum dia keluar
       await _unmarkLeft(mid);
     }
-    if (concert!.member(mid) != null) {
+    final cc = concert;
+    if (cc == null) return; // keluar selama memproses
+    if (cc.member(mid) != null) {
       if (verified) await _applyProfile(mid, p);
       return;
     }
@@ -1908,9 +2106,12 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Kirim laporan armada & check-in ke sheet (GAS). Pengirim asli + koordinator yang online.
   bool _syncing = false;
+  /// Jeda percobaan berikut saat gagal (30 dtk -> 5 mnt). Tanpa ini GAS dipanggil tiap 4 dtk selama error (kuota bersama!).
+  int _reportsRetryAt = 0, _reportsBackoff = 0;
   Future<void> _syncReports() async {
     final c = concert;
     if (_syncing || c == null || c.token.isEmpty) return;
+    if (DateTime.now().millisecondsSinceEpoch < _reportsRetryAt) return;
     final recs = await s.reports.find(s.db, finder: Finder(filter: Filter.equals('slug', slug), limit: 300));
     if (recs.isEmpty) return;
     _syncing = true;
@@ -1928,8 +2129,15 @@ class Hub extends ChangeNotifier with WidgetsBindingObserver {
       for (final id in ((res['accepted_ids'] as List?) ?? const [])) {
         await s.reports.record('$id').delete(s.db);
       }
+      _reportsBackoff = 0;
+      _reportsRetryAt = 0;
+    } on ApiError catch (e) {
+      // sesi tidak sah (dikeluarkan / keluar): berhenti sampai app dibuka ulang; lainnya: jeda bertahap
+      _reportsBackoff = e.isAuth ? 3600000 : min(300000, max(30000, _reportsBackoff * 2));
+      _reportsRetryAt = DateTime.now().millisecondsSinceEpoch + _reportsBackoff;
     } catch (_) {
-      // dicoba lagi saat flush berikutnya
+      _reportsBackoff = min(300000, max(30000, _reportsBackoff * 2));
+      _reportsRetryAt = DateTime.now().millisecondsSinceEpoch + _reportsBackoff;
     } finally {
       _syncing = false;
     }

@@ -43,6 +43,18 @@ class MainActivity : FlutterActivity() {
         return null
     }
 
+    /** Engine Flutter dihancurkan (back / swipe dari recents) tanpa onCancel: lepas sink supaya service tahu UI mati
+     *  (pesan masuk ke inbox + notifikasi, bukan dikirim ke engine yang sudah tidak ada). */
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        MeshBus.sink = null
+        super.cleanUpFlutterEngine(flutterEngine)
+    }
+
+    override fun onDestroy() {
+        MeshBus.sink = null
+        super.onDestroy()
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         val messenger = flutterEngine.dartExecutor.binaryMessenger
@@ -94,6 +106,14 @@ class MainActivity : FlutterActivity() {
                                 .putBoolean("enabled", en).putFloat("weak", weak.toFloat()).putLong("mute", mute)
                                 .putBoolean("active", active).putString("activeDay", day).apply()
                         }
+                        result.success(null)
+                    }
+                    "channels" -> {
+                        val list = call.argument<List<String>>("list") ?: emptyList()
+                        // disimpan: service yang dihidupkan ulang sistem (UI tertutup) tetap menyaring notifikasi
+                        getSharedPreferences("ct_vis", MODE_PRIVATE).edit()
+                            .putStringSet("list", list.toSet()).putString("cid", call.argument<String>("cid") ?: "").apply()
+                        MeshService.instance?.setVisibleChannels(list)
                         result.success(null)
                     }
                     "net" -> {

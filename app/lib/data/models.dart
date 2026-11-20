@@ -141,7 +141,7 @@ class Concert {
   }
 }
 
-/// Channel chat. id: 'g' (grup konser), 'k' (koordinator), 'a:<area>', 'd:<mid>:<mid>'.
+/// Channel chat. id: 'g' (grup konser), 'c:<mobil>' (grup mobil), 'k' (koordinator), 'a:<area>' (lama), 'd:<mid>:<mid>'.
 class Channel {
   Channel(this.id, this.title, {this.subtitle = '', this.peer});
   final String id;

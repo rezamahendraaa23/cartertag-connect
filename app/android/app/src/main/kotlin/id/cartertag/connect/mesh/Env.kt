@@ -15,6 +15,8 @@ class Env private constructor(val raw: ByteArray) {
     val id: ByteArray get() = raw.copyOfRange(8, 24)
     val idHex: String get() = hex(id)
     val cidHex: String get() = hex(raw.copyOfRange(24, 32))
+    /** Hash channel (8 byte): grup / DM tujuan, tanpa membuka isi. */
+    val chHex: String get() = hex(raw.copyOfRange(32, 40))
     val from: String get() = String(raw, 40, 12, Charsets.US_ASCII).trim()
     val ts: Long get() = ByteBuffer.wrap(raw, 52, 8).long
 

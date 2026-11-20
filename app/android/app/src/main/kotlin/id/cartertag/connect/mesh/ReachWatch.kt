@@ -194,6 +194,32 @@ class ReachWatch(private val ctx: Context) {
 
     fun cancel() = ctx.getSystemService(NotificationManager::class.java).cancel(NOTIF_REACH)
 
+    private var wifiTrapAt = 0L
+    /**
+     * Wi-Fi posko (tanpa internet) jadi jaringan utama padahal data seluler ada: terjadi kalau pengguna memilih
+     * "Tetap sambungkan" di notifikasi Android. Internet seluruh HP (Firebase, WhatsApp) ikut buntu -> beri tahu, maks 1x/jam.
+     */
+    @Volatile var wifiTrapSince = 0L
+    fun checkWifiTrap() {
+        val now = System.currentTimeMillis()
+        if (now - wifiTrapAt < 3600_000) return
+        try {
+            val cm = ctx.getSystemService(ConnectivityManager::class.java)
+            val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return
+            @Suppress("DEPRECATION")
+            val trapped = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) && !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
+                cm.allNetworks.any { cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true }
+            // sesaat setelah tersambung Android bisa memakai Wi-Fi beberapa detik sebelum validasi gagal: tunggu 30 dtk
+            if (!trapped) { wifiTrapSince = 0L; return }
+            if (wifiTrapSince == 0L) wifiTrapSince = now
+            if (now - wifiTrapSince < 30_000) return
+            wifiTrapAt = now
+            ctx.getSystemService(NotificationManager::class.java).notify(NOTIF_REACH + 1, build("Internet lewat Wi-Fi posko (tanpa internet)",
+                "HP ini memakai Wi-Fi posko sebagai jalur internet. Buka Setelan Wi-Fi > Wi-Fi posko, lalu nyalakan " +
+                    "\"Beralih ke data seluler\" / matikan \"Tetap sambungkan\", supaya internet lewat data seluler & Wi-Fi posko tetap untuk tim.", false))
+        } catch (_: Exception) {}
+    }
+
     private fun alert(prev: String, now: String, nearest: String, t: Long) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
         when (now) {

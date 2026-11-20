@@ -65,6 +65,8 @@ function connectCfg_(k) {
   return {
     enabled: c.enabled !== false,
     epoch: parseInt(c.epoch, 10) || 1,
+    // kapan kode terakhir direset (ms): token yang terbit sebelum ini tidak sah lagi (semua anggota tertendang)
+    resetAt: parseInt(c.resetAt, 10) || 0,
     manifest: { enabled: !(c.manifest && c.manifest.enabled === false), source: (c.manifest && c.manifest.source) === 'upload' ? 'upload' : 'plotting' },
     updatedAt: String(c.updatedAt || '')
   };
@@ -134,9 +136,12 @@ function connectSign_(payload) {
   return connectB64url_(Utilities.computeHmacSha256Signature(Utilities.newBlob(payload).getBytes(), Utilities.base64Decode(connectSecret_())));
 }
 
-/** Token member: base64url(json).hmac — berisi slug, member_id, epoch saat dibuat, kedaluwarsa (ms). */
-function connectMakeToken_(slug, mid) {
-  var p = connectB64urlStr_(JSON.stringify({ s: slug, m: mid, x: Date.now() + CONNECT_TOKEN_DAYS * 86400000 }));
+/**
+ * Token member: base64url(json).hmac — slug, member_id, epoch kode saat terbit (e), kedaluwarsa (x, ms).
+ * Reset kode menaikkan epoch: token dengan epoch lama (dan token lama tanpa e yang terbit sebelum reset) ditolak.
+ */
+function connectMakeToken_(slug, mid, epoch) {
+  var p = connectB64urlStr_(JSON.stringify({ s: slug, m: mid, e: epoch, x: Date.now() + CONNECT_TOKEN_DAYS * 86400000 }));
   return p + '.' + connectSign_(p);
 }
 
@@ -147,7 +152,19 @@ function connectAuth_(token) {
   var p = parseJson_(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString(), {});
   if (!p.s || !p.m || !(p.x > Date.now())) throw connectError_('auth', 'Sesi kedaluwarsa. Gabung ulang.');
   var k = useKonser_(p.s), cfg = connectCfg_(k);
-  if (!cfg.enabled) throw connectError_('disabled', 'Connect untuk konser ini sedang nonaktif.');
+  var iat = (Number(p.x) || 0) - CONNECT_TOKEN_DAYS * 86400000;
+  var stale = function () { return p.e !== undefined ? Number(p.e) !== cfg.epoch : (cfg.resetAt && iat < cfg.resetAt); };
+  // cache konser (2 mnt) bisa tertinggal sesaat setelah reset / tutup: baca ulang dari sheet sebelum menendang
+  var fcKey = 'K_FRESHCHK_' + p.s, cc = CacheService.getScriptCache();
+  if ((stale() || !cfg.enabled || k.status !== 'Aktif') && !cc.get(fcKey)) {
+    try { cc.put(fcKey, '1', 20); } catch (e) { /* abaikan */ }
+    var fk = findKonser_(p.s, true);
+    if (fk) { k = fk; _konser = k; _ss = null; cfg = connectCfg_(k); }
+  }
+  // konser ditutup / Connect dimatikan: semua anggota keluar otomatis
+  if (!cfg.enabled || k.status !== 'Aktif') throw connectError_('closed', 'Grup tim konser ini sudah ditutup koordinator.');
+  // kode diperbarui: semua sesi lama tidak sah
+  if (stale()) throw connectError_('reset', 'Kode konser sudah diperbarui koordinator. Gabung lagi pakai kode / link yang baru.');
   var team = connectTeam_(), me = team.byId[p.m];
   if (!me || me.status === 'dikeluarkan') throw connectError_('removed', 'Kamu sudah tidak terdaftar di tim konser ini.');
   if (me.status === 'keluar') throw connectError_('left', 'Kamu sudah keluar dari tim konser ini. Gabung lagi pakai kode.');
@@ -313,6 +330,30 @@ function connectManifestFor_(man, me) {
 
 // ============================================================ join / refresh
 
+/**
+ * Tulis c/<slug>/meta {epoch, closed} ke RTDB (dibaca rules). force: abaikan cache (admin baru mengubah).
+ * Tanpa force: perbaikan otomatis paling sering 1x/10 mnt per konser (PATCH yang dulu gagal diam-diam / konser lama).
+ */
+function connectSyncMeta_(k, cfg, force) {
+  if (!connectFirebaseReady_()) return;
+  var c = CacheService.getScriptCache(), key = 'CT_META_' + k.slug;
+  if (!force && (c.get(key) || c.get(key + '_F'))) return;
+  // perbaikan otomatis: jangan pakai cfg dari awal request (bisa sebelum admin menekan Reset / Tutup) -> baca segar
+  if (!force) { var fk = findKonser_(k.slug, true); if (fk) { k = fk; cfg = connectCfg_(fk); } }
+  var body = { epoch: cfg.epoch, closed: !(cfg.enabled && k.status === 'Aktif'), updatedAt: Date.now() };
+  for (var i = 0; i < 2; i++) {
+    try {
+      // epoch tidak pernah turun (balapan dengan reset admin)
+      var cur = connectRtdb_('GET', 'c/' + k.slug + '/meta/epoch');
+      if (Number(cur) > cfg.epoch) delete body.epoch;
+      connectRtdb_('PATCH', 'c/' + k.slug + '/meta', body); c.put(key, '1', 600); return;
+    } catch (e) { console.error(e); if (i === 0) Utilities.sleep(500); }
+  }
+  try { c.put(key + '_F', '1', 60); } catch (e) { /* abaikan */ }   // RTDB gangguan: jangan coba di setiap request
+  // gagal: cache tidak diisi -> dicoba lagi otomatis di join / refresh HP tim berikutnya (jangan suruh admin reset ulang:
+  // epoch akan naik lagi)
+}
+
 function connectBundle_(k, cfg, team, me) {
   var dates = (k.config.dates || []).slice();
   // options = konfigurasi klien Firebase (publik): {android:{apiKey, appId, messagingSenderId, projectId}, web:{..., authDomain}, vapidKey}
@@ -320,11 +361,16 @@ function connectBundle_(k, cfg, team, me) {
     options: parseJson_(setting_('FIREBASE_CLIENT_JSON'), null), topics: connectTopicsFor_(k.slug, me) } : null;
   return {
     member: connectRosterEntry_(me),
-    member_token: connectMakeToken_(k.slug, me.member_id),
+    member_token: connectMakeToken_(k.slug, me.member_id, cfg.epoch),
     konser: { slug: k.slug, nama: k.config.name || k.nama, venue: k.config.venue || '', dates: dates },
     epoch: cfg.epoch,
     group_key: connectGroupKey_(k.slug, cfg.epoch),
-    roster: team.list.filter(function (m) { return m.status !== 'dikeluarkan' && m.status !== 'keluar'; }).map(connectRosterEntry_),
+    // nomor HP: driver hanya menerima nomor koordinator (bukan nomor semua anggota)
+    roster: team.list.filter(function (m) { return m.status !== 'dikeluarkan' && m.status !== 'keluar'; }).map(function (m) {
+      var e = connectRosterEntry_(m);
+      if (me.role === 'driver' && m.role !== 'koordinator' && m.member_id !== me.member_id) e.hp = '';
+      return e;
+    }),
     // yang keluar / dikeluarkan: app menyembunyikannya juga dari daftar yang dikenal lewat Bluetooth (at = waktu keluar)
     gone: connectGone_(k.slug, team),
     manifest: connectManifestFor_(connectManifest_(cfg), me),
@@ -336,16 +382,60 @@ function connectBundle_(k, cfg, team, me) {
 
 /** Cari konser + role dari kode yang diketik. Hanya konser Aktif dengan Connect aktif. */
 function connectFindByCode_(code) {
-  var hit = null;
-  readKonserRows_().forEach(function (r) {
-    if (hit || r.status !== 'Aktif') return;
-    var k = rowToKonser_(r);
-    if (!connectCfg_(k).enabled) return;
-    var codes = connectCodes_(k);
-    if (codes.driver === code) hit = { k: k, role: 'driver' };
-    else if (codes.koordinator === code) hit = { k: k, role: 'koordinator' };
-  });
-  return hit;
+  // peta kode -> konser di-cache 10 mnt: spam kode salah tidak membaca master sheet & menghitung HMAC semua konser tiap kali
+  var cache = CacheService.getScriptCache(), map = parseJson_(cache.get('CJ_CODEMAP') || '', null);
+  if (!map) {
+    map = {};
+    readKonserRows_().forEach(function (r) {
+      if (r.status !== 'Aktif') return;
+      var k = rowToKonser_(r);
+      if (!connectCfg_(k).enabled) return;
+      var codes = connectCodes_(k);
+      map[codes.driver] = k.slug + '|driver';
+      map[codes.koordinator] = k.slug + '|koordinator';
+    });
+    try { cache.put('CJ_CODEMAP', JSON.stringify(map), 600); } catch (e) { /* peta terlalu besar: tanpa cache */ }
+  }
+  var v = map[code];
+  if (!v) return null;
+  var k = findKonser_(v.split('|')[0]);
+  if (!k || k.status !== 'Aktif' || !connectCfg_(k).enabled) return null;
+  var role = v.split('|')[1], codes = connectCodes_(k);
+  if (codes[role] !== code) return null;   // kode sudah direset sejak peta dibuat
+  return { k: k, role: role };
+}
+
+/**
+ * Tanda tangan Ed25519 HP atas 'ctjoin|kode|ts|pub_x': bukti pengirim memegang kunci privat perangkat (pub_ed).
+ * Tanpa ini siapa pun yang memegang kode bisa mengaku sebagai anggota lain (pub_ed semua anggota terlihat di roster).
+ * @return true kalau ada tanda tangan sah, false kalau tidak ada (app lama); melempar kalau tanda tangannya salah.
+ */
+function connectVerifyJoinSig_(b, code) {
+  if (!b.sig) return false;
+  var ts = Number(b.ts) || 0;
+  if (Math.abs(Date.now() - ts) > 10 * 60000) throw connectError_('clock', 'Jam HP tidak sesuai. Nyalakan tanggal & jam otomatis, lalu coba lagi.');
+  var u8 = function (bytes) { return new Uint8Array(bytes.map(function (x) { return x & 255; })); };
+  var ok = false;
+  try {
+    ok = nacl.sign.detached.verify(u8(Utilities.newBlob('ctjoin|' + code + '|' + ts + '|' + b.pub_x).getBytes()),
+      u8(Utilities.base64Decode(String(b.sig))), u8(Utilities.base64Decode(String(b.pub_ed))));
+  } catch (e) { ok = false; }
+  if (!ok) throw connectError_('keys', 'Tanda tangan perangkat tidak sah. Perbarui aplikasi lalu coba lagi.');
+  return true;
+}
+
+/** Daftar blokir RTDB (c/<slug>/ban/<mid>): rules menolak baca/tulis anggota yang keluar / dikeluarkan. */
+function connectBan_(slug, mid, on) {
+  if (!connectFirebaseReady_() || !mid) return true;
+  for (var i = 0; i < 2; i++) {
+    try {
+      connectRtdb_(on ? 'PUT' : 'DELETE', 'c/' + slug + '/ban/' + mid, on ? true : undefined);
+      // presence ikut dimatikan: onDisconnect HP yang diblokir ditolak rules, "online" bisa tertinggal
+      if (on) connectRtdb_('PATCH', 'c/' + slug + '/presence/' + mid, { on: false, left: true });
+      return true;
+    } catch (e) { console.error(e); if (i === 0) Utilities.sleep(400); }
+  }
+  return false;
 }
 
 /** Gabung: cukup nama + kode (+ nomor mobil untuk driver). Role ditentukan kode. */
@@ -355,20 +445,39 @@ function connectJoin_(b) {
   var code = String(b.kode || '').toUpperCase().replace(/^CT-?/, '').replace(/[^A-Z0-9]/g, '');
   if (code.length !== 6) throw connectError_('kode', 'Kode terdiri dari 6 karakter, contoh CT-7KQ4MX.');
   if (!/^[A-Za-z0-9+/=_-]{40,64}$/.test(String(b.pub_x || '')) || !/^[A-Za-z0-9+/=_-]{40,64}$/.test(String(b.pub_ed || ''))) throw connectError_('keys', 'Kunci perangkat tidak valid. Perbarui aplikasi.');
+  if (connectOldApp_(b.app_version)) throw connectError_('upgrade', 'Perbarui aplikasi CarterTag Connect ke versi ' + CONNECT_MIN_APP + ', lalu gabung lagi.');
   var dev = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(b.pub_ed))).substring(0, 16);
   var hit = connectRateLimit_('CJ_' + dev, 8, 600);
 
   var found = connectFindByCode_(code);
-  if (!found) { hit(); throw connectError_('kode', 'Kode tidak ditemukan. Cek lagi ke koordinator.'); }
+  if (!found) {
+    hit();
+    // batas global hanya untuk percobaan GAGAL (pub_ed bisa dikarang tiap percobaan): kode yang benar tidak ikut terkunci
+    connectRateLimit_('CJ_FAIL_ALL', 300, 600)();
+    throw connectError_('kode', 'Kode tidak ditemukan. Cek lagi ke koordinator.');
+  }
   var k = found.k, role = found.role;
-  var car = cap_(b.car, 10).replace(/^(mobil|m|c)\s*/i, '').trim();   // "C3" / "mobil 3" -> "3" (sama dengan kolom No di Plotingan)
+  // "C3" / "mobil 3" -> "3" (sama dengan kolom No di Plotingan); karakter lain dibuang supaya cocok dengan channel grup mobil
+  var car = cap_(b.car, 10).replace(/^(mobil|m|c)\s*/i, '').trim();
+  if (car && !/^[A-Za-z0-9 -]{1,10}$/.test(car)) throw connectError_('car', 'Nomor mobil hanya boleh huruf / angka, contoh 3 atau 12.');
   if (role === 'driver' && !car) throw connectError_('car', 'Kamu pakai kode driver: isi nomor mobil kamu.');
   _konser = k; _ss = null;
   var cfg = connectCfg_(k);
 
-  return withLock_(function () {
+  var toBan = [], joinedMid = '', wasOut = false;
+  var bundle = withLock_(function () {
     var team = connectTeam_(true), mid = connectMemberId_(k.slug, String(b.pub_ed)), me = team.byId[mid];
+    joinedMid = mid;
+    wasOut = !!(me && me.status === 'keluar');
     if (me && me.status === 'dikeluarkan') throw connectError_('removed', 'HP ini sudah dikeluarkan dari tim konser. Hubungi koordinator.');
+    // mengubah anggota yang sudah ada wajib bukti kunci perangkat (cegah menyamar pakai pub_ed orang lain dari roster).
+    // Anggota baru tidak butuh: jam HP yang meleset tidak menghalangi gabung pertama.
+    if (me) {
+      var signed;
+      // gagal tanda tangan dihitung global (bukan per perangkat: orang lain bisa mengunci gabung ulang korban)
+      try { signed = connectVerifyJoinSig_(b, code); } catch (e) { if (e.code === 'keys') connectRateLimit_('CJ_SIGFAIL_ALL', 200, 600)(); throw e; }
+      if (!signed) throw connectError_('upgrade', 'Perbarui aplikasi CarterTag Connect ke versi terbaru, lalu gabung lagi.');
+    }
     if (!me) {
       me = { member_id: mid, hp: '', cars: [], area: '', _row: 0 };
       team.byId[mid] = me; team.list.push(me);
@@ -382,9 +491,12 @@ function connectJoin_(b) {
     var hp = connectHp_(b.hp);
     if (hp) {
       me.hp = hp;   // opsional: supaya tim bisa telepon / WhatsApp
-      // nomor HP sama tapi perangkat lain (app dipasang ulang / ganti HP): baris lama dianggap keluar
+      // nomor HP sama tapi perangkat lain (app dipasang ulang / ganti HP): baris lama dianggap keluar HANYA kalau sudah
+      // tidak aktif > 24 jam. Yang masih aktif tidak disentuh (orang lain bisa mengisi nomor siapa pun); admin yang memutuskan.
       team.list.forEach(function (o) {
-        if (o.member_id !== me.member_id && o.hp === hp && o.status === 'aktif') { o.status = 'keluar'; connectUpsertMember_(o); }
+        if (o.member_id === me.member_id || o.hp !== hp || o.status !== 'aktif') return;
+        if (Date.now() - connectMs_(o.last_seen) < 24 * 3600000) return;
+        o.status = 'keluar'; o.fcm_token = ''; connectUpsertMember_(o); toBan.push(o.member_id);
       });
     }
     me.pub_x = String(b.pub_x); me.pub_ed = String(b.pub_ed);
@@ -398,9 +510,37 @@ function connectJoin_(b) {
     connectUpsertMember_(me);
     return connectBundle_(k, cfg, team, me);
   });
+  // panggilan RTDB di luar lock (lock dipakai bersama form registrasi)
+  toBan.forEach(function (m) { connectBan_(k.slug, m, true); });
+  // gabung lagi setelah keluar: buka blokir RTDB. Gagal: dicoba lagi di refresh berikutnya (penanda cache)
+  if (wasOut) {
+    // gagal -> 6 jam dicoba ulang di refresh; berhasil pun tetap diulang sekali dalam 10 mnt: pemberitahuan keluar yang
+    // telat diproses server bisa memasang blokir SESUDAH DELETE ini
+    var unbanOk = connectBan_(k.slug, joinedMid, false);
+    try { CacheService.getScriptCache().put('CT_UNBAN_' + k.slug + '_' + joinedMid, '1', unbanOk ? 600 : 21600); } catch (e) { /* abaikan */ }
+  }
+  connectSyncMeta_(k, cfg, false);
+  return bundle;
+}
+
+/**
+ * Versi app minimum (grup mobil, tanda tangan join, keluar otomatis). Versi kosong (klien lama tanpa info) dibiarkan.
+ * 1.5 menampilkan error 'auth' sebagai banner merah di layar utama, jadi pesan update pasti terlihat.
+ */
+var CONNECT_MIN_APP = '1.6.0';
+function connectOldApp_(v) {
+  v = String(v || '');
+  if (!v) return false;
+  var a = v.split('.'), m = CONNECT_MIN_APP.split('.');
+  for (var i = 0; i < 3; i++) {
+    var x = parseInt(a[i], 10) || 0, y = parseInt(m[i], 10) || 0;
+    if (x !== y) return x < y;
+  }
+  return false;
 }
 
 function connectRefresh_(b) {
+  if (connectOldApp_(b.app_version)) throw connectError_('auth', 'Perbarui aplikasi CarterTag Connect ke versi ' + CONNECT_MIN_APP + ' (menu Saya → Cek pembaruan).');
   var a = connectAuth_(b.member_token), me = a.me;
   var changed = false;
   if (b.fcm_token !== undefined && cap_(b.fcm_token, 400) !== me.fcm_token) { me.fcm_token = cap_(b.fcm_token, 400); changed = true; }
@@ -408,9 +548,19 @@ function connectRefresh_(b) {
   // last_seen ditulis paling sering tiap 10 menit per anggota (hemat kuota tulis sheet)
   var c = CacheService.getScriptCache(), seenKey = 'CS_' + _konser.slug + '_' + me.member_id;
   if (changed || !c.get(seenKey)) {
-    withLock_(function () { var fresh = connectTeam_(true).byId[me.member_id]; if (fresh) { me._row = fresh._row; connectUpsertMember_(me); } });
+    // hanya kolom milik sesi ini, dari baris segar: menulis ulang seluruh baris (status/role lama dari cache) bisa
+    // membatalkan "Keluarkan" admin yang terjadi bersamaan
+    withLock_(function () {
+      var fresh = connectTeam_(true).byId[me.member_id];
+      if (!fresh || fresh.status !== 'aktif') throw connectError_('removed', 'Kamu sudah tidak terdaftar di tim konser ini.');
+      updateObjectIn_(connectSs_(), CONNECT_TAB.TEAM, fresh._row, { fcm_token: me.fcm_token || '', app_version: me.app_version || '', last_seen: nowLocal_() });
+      connectTeamClear_();
+    });
     c.put(seenKey, '1', 600);
   }
+  var uk = 'CT_UNBAN_' + a.konser.slug + '_' + me.member_id;
+  if (c.get(uk) && connectBan_(a.konser.slug, me.member_id, false)) c.remove(uk);
+  connectSyncMeta_(a.konser, a.cfg, false);
   return connectBundle_(a.konser, a.cfg, a.team, me);
 }
 
@@ -434,7 +584,8 @@ function connectLeave_(b) {
   var p = parseJson_(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString(), {});
   if (!p.s || !p.m) throw connectError_('auth', 'Sesi tidak valid.');
   useKonser_(p.s);
-  return withLock_(function () {
+  var banIt = false;
+  var res = withLock_(function () {
     var me = connectTeam_(true).byId[p.m];
     if (!me) return { left: false };
     // token diterbitkan (jam server) sebelum gabung terakhir = pemberitahuan dari sesi lama (tertunda / telat diproses): abaikan.
@@ -446,9 +597,12 @@ function connectLeave_(b) {
       me.status = 'keluar'; me.fcm_token = ''; connectUpsertMember_(me);
       // waktu keluar presisi ms untuk daftar 'gone' (last_seen di sheet cuma sampai menit)
       CacheService.getScriptCache().put('CLMS_' + p.s + '_' + p.m, String(Date.now()), 21600);
+      banIt = true;
     }
     return { left: true };
   });
+  if (banIt) connectBan_(p.s, p.m, true);   // di luar lock (lock dipakai bersama form registrasi)
+  return res;
 }
 
 // ============================================================ notifikasi (FCM)
@@ -458,6 +612,8 @@ function connectTopic_(slug, scope) {
   return ('ct_' + slug + '_' + scope).replace(/[^a-zA-Z0-9\-_.~%]/g, '_').substring(0, 200);
 }
 function connectAreaScope_(area) { return 'a_' + String(area || '').toLowerCase().replace(/[^a-z0-9]+/g, '_'); }
+/** Grup mobil (app 1.6+): c_<nomor mobil> = driver mobil itu (koordinator lewat topik koord). */
+function connectCarScope_(car) { return 'c_' + String(car || '').toLowerCase().replace(/[^a-z0-9]+/g, '_'); }
 
 /** App 1.3.0+ berlangganan topik; versi lebih lama tetap dikirim per token. */
 function connectTopicReady_(ver) {
@@ -470,6 +626,7 @@ function connectTopicsFor_(slug, m) {
   var t = [connectTopic_(slug, 'all')];
   if (m.role !== 'driver') t.push(connectTopic_(slug, 'koord'));
   if (m.area) t.push(connectTopic_(slug, connectAreaScope_(m.area)));
+  if (m.role === 'driver') ((m.cars && m.cars.length) ? m.cars : [m.nomor_mobil]).forEach(function (c) { if (c) t.push(connectTopic_(slug, connectCarScope_(c))); });
   return t;
 }
 
@@ -483,21 +640,33 @@ function connectNotify_(b) {
   var a = connectAuth_(b.member_token);
   if (!connectFirebaseReady_()) return { sent: 0, reason: 'firebase_not_configured' };
   var ch = String(b.ch || 'g'), prio = parseInt(b.prio, 10) || 0, me = a.me;
-  var hit = connectRateLimit_('CN_' + _konser.slug + '_' + me.member_id, prio >= 2 ? 1000 : 120, 60); hit();
+  if (!/^(g|k|c:[A-Za-z0-9 _-]{1,10}|a:[^:]{1,40}|d:m_[a-z2-7]{10}:m_[a-z2-7]{10})$/.test(ch)) throw connectError_('ch', 'Channel tidak valid.');
   var isDm = ch.indexOf('d:') === 0;
+  // hanya boleh mengirim ke channel tempat dia anggota
+  if (isDm && ch.split(':').indexOf(me.member_id) === -1) throw connectError_('forbidden', 'Tidak diizinkan.');
+  var myCars = (me.cars && me.cars.length) ? me.cars : [me.nomor_mobil];
+  if (me.role === 'driver' && (ch === 'k' || (ch.indexOf('c:') === 0 && myCars.indexOf(ch.substring(2)) === -1))) throw connectError_('forbidden', 'Tidak diizinkan.');
+  // prio dari klien dibatasi: prio 2 (alarm SOS ke semua) hanya untuk jenis sos
+  prio = Math.max(0, Math.min(prio, 2));
+  if (prio >= 2 && String(b.kind) !== 'sos') prio = 1;
+  connectRateLimit_('CN_' + _konser.slug + '_' + me.member_id, prio >= 2 ? 20 : 60, 60)();
+  if (prio < 2) connectRateLimit_('CN_ALL_' + _konser.slug, 600, 60)();   // SOS tidak boleh tertahan anggaran konser   // anggaran per konser: kuota UrlFetch dipakai bersama form registrasi
   var topics = [];
+  // SOS (prio 2) & grup konser ke semua; grup lain hanya ke anggotanya (pesan penting di grup mobil tidak menyebar ke semua)
+  var toAll = prio >= 2 || ch === 'g' || (prio >= 1 && ch.indexOf('c:') !== 0 && ch !== 'k' && ch.indexOf('a:') !== 0);
   if (!isDm) {
-    if (prio >= 1 || ch === 'g') topics = [connectTopic_(_konser.slug, 'all')];
+    if (toAll) topics = [connectTopic_(_konser.slug, 'all')];
     else if (ch === 'k') topics = [connectTopic_(_konser.slug, 'koord')];
     else if (ch.indexOf('a:') === 0) topics = [connectTopic_(_konser.slug, connectAreaScope_(ch.substring(2))), connectTopic_(_konser.slug, 'koord')];
+    else if (ch.indexOf('c:') === 0) topics = [connectTopic_(_konser.slug, connectCarScope_(ch.substring(2))), connectTopic_(_konser.slug, 'koord')];
   }
   var targets = a.team.list.filter(function (m) {
     if (m.member_id === me.member_id || !m.fcm_token || m.status !== 'aktif') return false;
     if (!isDm && m.platform !== 'web' && connectTopicReady_(m.app_version)) return false;   // Android 1.3.0+ sudah lewat topik
-    if (prio >= 1) return true;   // pengumuman / SOS ke semua
-    if (ch === 'g') return true;
+    if (toAll) return true;   // SOS / grup konser ke semua
     if (ch === 'k') return m.role !== 'driver';
     if (ch.indexOf('a:') === 0) return m.role === 'koordinator' || String(m.area).toLowerCase() === ch.substring(2).toLowerCase();
+    if (ch.indexOf('c:') === 0) return m.role !== 'driver' || ((m.cars && m.cars.length) ? m.cars : [m.nomor_mobil]).indexOf(ch.substring(2)) !== -1;
     if (ch.indexOf('d:') === 0) return ch.split(':').indexOf(m.member_id) !== -1;
     return false;
   });
@@ -562,19 +731,42 @@ function connectSyncReports_(b) {
   var a = connectAuth_(b.member_token), me = a.me, accepted = [];
   var fleet = (b.fleet || []).slice(0, 300), checkins = (b.checkins || []).slice(0, 500);
   if (!fleet.length && !checkins.length) return { accepted_ids: [] };
+  // validasi per item: angka dipaksa angka (satu nilai raksasa dulu menggagalkan seluruh batch & batch itu macet selamanya),
+  // pengirim hanya anggota tim, driver hanya untuk mobilnya sendiri
+  var num = function (v) { var n = Number(v); return isFinite(n) ? n : ''; };
+  var byOk = function (v) { v = String(v || ''); return a.team.byId[v] ? v : me.member_id; };
+  // dinilai per PEMILIK laporan (laporan titipan dari HP lain lewat mesh); 'batal' milik sendiri boleh untuk mobil lama
+  // (ganti nomor mobil: server sudah mencatat mobil baru saat centang mobil lama dikosongkan)
+  var mineOrders = {};
+  var carOk = function (car, by, status, order) {
+    var owner = a.team.byId[String(by || '')] || me;
+    if (owner.role !== 'driver') return true;
+    var oCars = (owner.cars && owner.cars.length) ? owner.cars : [owner.nomor_mobil];
+    return oCars.indexOf(String(car || '')) !== -1 ||
+      (status === 'batal' && owner.member_id === me.member_id && !!mineOrders[String(order || '')]);
+  };
+  var FLEET_ST = ['siap', 'menuju', 'di_titik', 'berangkat', 'tiba', 'selesai', 'kendala'];   // = fleetShort (app) & TL_STATUS (Console)
   return withLock_(function () {
     var ss = connectSs_(), now = nowLocal_();
     var seen = {};
-    [CONNECT_TAB.FLEET, CONNECT_TAB.CHECKIN].forEach(function (t) { readTableIn_(ss, t).forEach(function (r) { seen[String(r.event_id)] = 1; }); });
+    mineOrders = {};   // order yang pernah saya centang: 'batal' di mobil lama hanya untuk ini
+    [CONNECT_TAB.FLEET, CONNECT_TAB.CHECKIN].forEach(function (t) {
+      readTableIn_(ss, t).forEach(function (r) {
+        seen[String(r.event_id)] = 1;
+        if (t === CONNECT_TAB.CHECKIN && String(r.oleh) === me.member_id) mineOrders[String(r.order_id)] = 1;
+      });
+    });
     var fleetRows = [], chkRows = [];
     fleet.forEach(function (f) {
       var id = cap_(f.event_id, 40);
       if (!id) return;
-      accepted.push(id);
+      accepted.push(id);   // item rusak tetap "diterima" supaya tidak dikirim ulang terus
       if (seen[id]) return;
       seen[id] = 1;
-      fleetRows.push({ event_id: id, nomor_mobil: cap_(f.car, 10), member_id: cap_(f.by || me.member_id, 20), leg: f.leg === 'pulang' ? 'pulang' : 'pergi',
-        status: cap_(f.status, 20), catatan: cap_(f.note, 200), lat: f.lat || '', lng: f.lng || '', akurasi_m: f.acc || '', waktu: cap_(f.at, 25), synced_at: now });
+      if (!carOk(f.car, f.by)) return;
+      var st = String(f.status || '');
+      fleetRows.push({ event_id: id, nomor_mobil: cap_(f.car, 10), member_id: byOk(f.by), leg: f.leg === 'pulang' ? 'pulang' : 'pergi',
+        status: FLEET_ST.indexOf(st) !== -1 ? st : 'lainnya', catatan: noFormula_(cap_(f.note, 200)), lat: num(f.lat), lng: num(f.lng), akurasi_m: num(f.acc), waktu: cap_(f.at, 25), synced_at: now });
     });
     checkins.forEach(function (c) {
       var id = cap_(c.event_id, 40);
@@ -582,9 +774,10 @@ function connectSyncReports_(b) {
       accepted.push(id);
       if (seen[id]) return;
       seen[id] = 1;
+      if (!carOk(c.car, c.by, c.status, c.order_id)) return;
       chkRows.push({ event_id: id, order_id: cap_(c.order_id, 30), hari: cap_(c.hari, 12), leg: c.leg === 'pulang' ? 'pulang' : 'pergi',
         // batal = centang dikosongkan (mis. driver salah nomor mobil lalu menggantinya)
-        status: c.status === 'tidak_datang' ? 'tidak_datang' : (c.status === 'batal' ? 'batal' : 'naik'), nomor_mobil: cap_(c.car, 10), oleh: cap_(c.by || me.member_id, 20), waktu: cap_(c.at, 25), synced_at: now });
+        status: c.status === 'tidak_datang' ? 'tidak_datang' : (c.status === 'batal' ? 'batal' : 'naik'), nomor_mobil: cap_(c.car, 10), oleh: byOk(c.by), waktu: cap_(c.at, 25), synced_at: now });
     });
     connectAppendRows_(ss, CONNECT_TAB.FLEET, fleetRows);
     connectAppendRows_(ss, CONNECT_TAB.CHECKIN, chkRows);
@@ -623,7 +816,8 @@ function connectCustomToken_(slug, me) {
     iss: sa.client_email, sub: sa.client_email,
     aud: 'https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit',
     iat: now, exp: now + 3600, uid: slug + '__' + me.member_id,
-    claims: { konser: slug, mid: me.member_id, role: me.role, cars: (me.cars && me.cars.length ? me.cars : (me.nomor_mobil ? [me.nomor_mobil] : [])).join(',') }
+    claims: { konser: slug, mid: me.member_id, role: me.role, ep: connectCfg_(_konser).epoch,
+      cars: (me.cars && me.cars.length ? me.cars : (me.nomor_mobil ? [me.nomor_mobil] : [])).join(',') }
   });
 }
 
@@ -712,7 +906,7 @@ function adminConnectSave(token, slug, input) {
     adminNeed_('timlapangan:edit');
     var k = adminUse_(slug, true), cur = connectCfg_(k);
     input = input || {};
-    if (input.enabled !== undefined) cur.enabled = !!input.enabled;
+    if (input.enabled !== undefined) { cur.enabled = !!input.enabled; CacheService.getScriptCache().remove('CJ_CODEMAP'); }
     if (input.manifest) {
       if (input.manifest.enabled !== undefined) cur.manifest.enabled = !!input.manifest.enabled;
       if (input.manifest.source) cur.manifest.source = input.manifest.source === 'upload' ? 'upload' : 'plotting';
@@ -721,6 +915,9 @@ function adminConnectSave(token, slug, input) {
     k.config.connect = cur;
     persistKonser_(k);
     _konser = k; _ss = null;
+    try { CacheService.getScriptCache().put('K_' + k.slug, JSON.stringify(k), KONSER_CACHE_TTL); } catch (e) { /* abaikan */ }
+    // Connect dimatikan: sesi Firebase semua anggota ditolak rules (meta/closed), app refresh lalu tertendang
+    if (input.enabled !== undefined) connectSyncMeta_(k, cur, true);
     return { success: true, data: connectAdminSnapshot_(k) };
   });
 }
@@ -730,13 +927,16 @@ function adminConnectCode(token, slug, reset) {
   return adminGuard_(token, function () {
     adminNeed_('timlapangan:edit');
     var k = adminUse_(slug, true), cur = connectCfg_(k);
-    if (reset) cur.epoch = cur.epoch + 1;
+    if (reset) { cur.epoch = cur.epoch + 1; cur.resetAt = Date.now(); CacheService.getScriptCache().remove('CJ_CODEMAP'); }
     cur.updatedAt = nowLocal_();
     k.config.connect = cur;
     persistKonser_(k);
     _konser = k; _ss = null;
     connectGroupKey_(k.slug, cur.epoch);
-    if (connectFirebaseReady_()) { try { connectRtdb_('PATCH', 'c/' + k.slug + '/meta', { epoch: cur.epoch, updatedAt: Date.now() }); } catch (e) { console.error(e); } }
+    try { CacheService.getScriptCache().put('K_' + k.slug, JSON.stringify(k), KONSER_CACHE_TTL); } catch (e) { /* abaikan */ }
+    connectTeamClear_();
+    // rules RTDB: sesi Firebase dengan epoch lama langsung ditolak (app 1.6+), app lalu refresh -> tertendang
+    if (reset) connectSyncMeta_(k, cur, true);
     return { success: true, data: connectAdminSnapshot_(k) };
   });
 }
@@ -747,6 +947,7 @@ function adminConnectMemberUpdate(token, slug, memberId, patch) {
     adminNeed_('timlapangan:edit');
     adminUse_(slug);
     patch = patch || {};
+    var ban = null;
     withLock_(function () {
       var team = connectTeam_(true), m = team.byId[String(memberId)];
       if (!m) throw new Error('Anggota tidak ditemukan.');
@@ -757,9 +958,16 @@ function adminConnectMemberUpdate(token, slug, memberId, patch) {
       if (patch.status !== undefined) {
         if (['dikeluarkan', 'aktif', 'diundang', 'keluar'].indexOf(patch.status) === -1) throw new Error('Status tidak dikenal.');
         m.status = patch.status === 'aktif' && !m.pub_x ? 'diundang' : patch.status;
+        if (m.status === 'dikeluarkan' || m.status === 'keluar') {
+          m.fcm_token = '';   // tidak menerima push lagi
+          CacheService.getScriptCache().put('CLMS_' + _konser.slug + '_' + m.member_id, String(Date.now()), 21600);
+        }
       }
       connectUpsertMember_(m);
+      // akses Firebase ikut dicabut / dikembalikan (rules memeriksa c/<slug>/ban/<mid>)
+      if (patch.status !== undefined) ban = { mid: m.member_id, on: m.status === 'dikeluarkan' || m.status === 'keluar' };
     });
+    if (ban) connectBan_(_konser.slug, ban.mid, ban.on);
     return { success: true, data: connectAdminSnapshot_(_konser) };
   });
 }

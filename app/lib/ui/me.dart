@@ -14,6 +14,7 @@ import '../core/ids.dart';
 import '../core/theme.dart';
 import '../data/models.dart';
 import '../main.dart';
+import '../services/api.dart';
 import '../services/hub.dart';
 import '../services/mesh.dart';
 import '../services/online.dart';
@@ -140,19 +141,48 @@ class _MeScreenState extends State<MeScreen> {
         ],
       ),
     );
-    if (car == null || !context.mounted) return;
+    if (car == null || !context.mounted || _changingCar) return;
     final messenger = ScaffoldMessenger.maybeOf(context);
+    final nav = Navigator.of(context, rootNavigator: true);
+    // proses ke server bisa beberapa detik: tampilkan progres & tolak ketukan ulang (join ganda)
+    final progress = DialogRoute<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const PopScope(
+        canPop: false,
+        child: AlertDialog(
+          content: Row(children: [
+            SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 3)),
+            SizedBox(width: 16),
+            Expanded(child: Text('Mengganti nomor mobil…')),
+          ]),
+        ),
+      ),
+    );
+    _changingCar = true;
+    unawaited(nav.push(progress));
     try {
       await h.changeCar(car);
       messenger?.showSnackBar(SnackBar(content: Text('Nomor mobil diganti ke ${carName(car)}. Daftar penumpang sudah diperbarui.')));
     } catch (e) {
+      // dikeluarkan otomatis di tengah jalan: layar awal sudah menampilkan alasannya
+      if ((e is ApiError && e.code == 'cancel') || h.concert == null) return;
       messenger?.showSnackBar(SnackBar(content: Text('Gagal ganti nomor mobil: $e')));
+    } finally {
+      _changingCar = false;
+      if (progress.isActive) nav.removeRoute(progress);
     }
   }
 
+  bool _changingCar = false;
+
+  // ikut berubah saat internet kembali / nomor mobil diganti
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ListenableBuilder(listenable: Hub.i, builder: (context, _) => _body(context));
+
+  Widget _body(BuildContext context) {
     final h = Hub.i;
+    if (h.concert == null) return const SizedBox.shrink();
     final me = h.me;
     final c = CT.of(context);
     return ListView(padding: const EdgeInsets.only(bottom: 40), children: [
@@ -615,7 +645,9 @@ class _BridgeHostScreenState extends State<BridgeHostScreen> {
     final known = h.member(mid);
     var ok = known != null;
     if (!ok && mounted) {
-      final car = '${hello['car'] ?? ''}'.trim();
+      // klien iPhone versi lama bisa mengirim "C3": normalkan di host juga
+      final car = carDigits('${hello['car'] ?? ''}');
+      hello['car'] = car;
       ok = await confirm(context,
           title: 'Izinkan ${hello['n']} bergabung?',
           text: car.isEmpty ? 'Masuk sebagai anggota tim. Izinkan hanya kalau kamu kenal orangnya.' : 'Masuk sebagai driver mobil $car. Izinkan hanya kalau kamu kenal orangnya.',

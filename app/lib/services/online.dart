@@ -45,6 +45,18 @@ class Online {
   /// Lokasi anggota dari presence (member_id -> {lat, lng, acc, bat, at}).
   Stream<MapEntry<String, Map<String, dynamic>>> get locations => _locCtl.stream;
   bool get ready => _db != null;
+  String? _signedTok;
+
+  /// Dipanggil saat Firebase menolak akses (permission-denied): Hub cek ke server apakah sesi masih sah.
+  void Function()? onDenied;
+
+  /// Listener yang ditolak Firebase berhenti selamanya: attach berikutnya wajib pasang ulang.
+  bool _broken = false;
+
+  void _err(Object e) {
+    _broken = true;
+    if (e is FirebaseException && e.code == 'permission-denied') onDenied?.call();
+  }
 
   static FirebaseOptions? optionsFrom(Map<String, dynamic>? fb) {
     if (fb == null) return null;
@@ -76,12 +88,25 @@ class Online {
       await Store.i.put('fb_db_url', '${fb['db_url']}');
       final auth = FirebaseAuth.instance;
       final uid = '${c.slug}__${c.me.id}';
-      if (auth.currentUser?.uid != uid && fb['custom_token'] != null) {
-        await auth.signInWithCustomToken('${fb['custom_token']}');
+      final tok = fb['custom_token'] == null ? null : '${fb['custom_token']}';
+      // token baru (mis. epoch kode naik) wajib dipakai login ulang: klaim 'ep' lama ditolak rules
+      // disimpan (bukan hanya di memori): buka app tidak login ulang pakai token lama tersimpan yang sudah kedaluwarsa (1 jam)
+      _signedTok ??= await Store.i.get<String>('fb_signed_tok');
+      if (tok != null && (auth.currentUser?.uid != uid || tok != _signedTok)) {
+        try {
+          await auth.signInWithCustomToken(tok);
+          _signedTok = tok;
+          await Store.i.put('fb_signed_tok', tok);
+        } catch (e) {
+          // token kedaluwarsa tapi sesi Firebase saya masih ada: pakai sesi itu, refresh berikutnya membawa token baru
+          if (auth.currentUser?.uid != uid) rethrow;
+          debugPrint('signIn ulang gagal, pakai sesi lama: $e');
+        }
       }
       if (!kIsWeb) unawaited(syncTopics(((fb['topics'] as List?) ?? const []).map((e) => '$e').toList()));
-      if (_slug == c.slug && _db != null) return true;
+      if (_slug == c.slug && _db != null && !_broken) return true;
       await detach();
+      _broken = false;
       _slug = c.slug;
       _db = FirebaseDatabase.instanceFor(app: Firebase.app(), databaseURL: '${fb['db_url']}');
       if (!kIsWeb) _db!.setPersistenceEnabled(false);
@@ -102,7 +127,7 @@ class Online {
           final t = v['t'];
           if (t is int) Store.i.put('online_since_${c.slug}', t);
         }
-      }, onError: (_) {}));
+      }, onError: _err));
       void loc(DatabaseEvent e) {
         final v = e.snapshot.value;
         if (v is Map) {
@@ -115,16 +140,16 @@ class Online {
         }
       }
 
-      _subs.add(_db!.ref('c/${c.slug}/presence').onChildAdded.listen(loc, onError: (_) {}));
-      _subs.add(_db!.ref('c/${c.slug}/presence').onChildChanged.listen(loc, onError: (_) {}));
+      _subs.add(_db!.ref('c/${c.slug}/presence').onChildAdded.listen(loc, onError: _err));
+      _subs.add(_db!.ref('c/${c.slug}/presence').onChildChanged.listen(loc, onError: _err));
       void ann(DatabaseEvent e) {
         final v = e.snapshot.value;
         if (v is Map) _annCtl.add(v.cast<String, dynamic>());
       }
 
       // onChildChanged: pengumuman dihapus dari Console ditandai 'del'
-      _subs.add(_db!.ref('c/${c.slug}/ann').onChildAdded.listen(ann, onError: (_) {}));
-      _subs.add(_db!.ref('c/${c.slug}/ann').onChildChanged.listen(ann, onError: (_) {}));
+      _subs.add(_db!.ref('c/${c.slug}/ann').onChildAdded.listen(ann, onError: _err));
+      _subs.add(_db!.ref('c/${c.slug}/ann').onChildChanged.listen(ann, onError: _err));
       return true;
     } catch (e) {
       debugPrint('Online.attach gagal: $e');
@@ -182,7 +207,7 @@ class Online {
       await db.ref('c/$slug/env/$idHex').set({'e': base64Encode(env), 't': ServerValue.timestamp, 'f': from}).timeout(const Duration(seconds: 12));
       return true;
     } on FirebaseException catch (e) {
-      return e.code == 'permission-denied'; // sudah ada (ditulis gateway lain)
+      return e.code == 'permission-denied'; // sudah ada (ditulis gateway lain); sesi dicabut ditangkap listener (_err)
     } catch (_) {
       return false;
     }

@@ -42,7 +42,17 @@ class WelcomeScreen extends StatelessWidget {
             _point(context, LucideIcons.bluetooth, 'Sinyal hilang', 'Pesan lompat dari HP ke HP lewat Bluetooth.'),
             _point(context, LucideIcons.siren, 'Darurat', 'Tahan tombol SOS, semua HP tim berbunyi.'),
             const Spacer(flex: 2),
-            FilledButton(onPressed: () => openPermissionsThen(context, const JoinScreen()), child: const Text('Mulai')),
+            if (Hub.i.kickNotice != null) ...[
+              InfoBanner(tone: Tone.danger, text: Hub.i.kickNotice!, margin: EdgeInsets.zero),
+              const SizedBox(height: 12),
+            ],
+            FilledButton(
+              onPressed: () {
+                Hub.i.dismissKick();
+                openPermissionsThen(context, const JoinScreen());
+              },
+              child: Text(Hub.i.kickNotice != null ? 'Gabung lagi' : 'Mulai'),
+            ),
           ]),
         ),
       ),
@@ -287,6 +297,10 @@ class _JoinScreenState extends State<JoinScreen> {
       if (!mounted) return;
       Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => ConfirmScreen(concert: c)), (_) => false);
     } on ApiError catch (e) {
+      if (e.code == 'cancel') {
+        if (mounted) setState(() => busy = false);
+        return;
+      }
       if (e.code == 'car') {
         setState(() => busy = false);
         final n = await _askCar();
@@ -665,9 +679,15 @@ class _InviteScanScreenState extends State<InviteScanScreen> {
   Future<void> _join() async {
     if (!_form.currentState!.validate()) return;
     setState(() => busy = true);
-    final c = await Hub.i.joinFromInvite(qr!, nama: name.text.trim(), car: carDigits(car.text));
-    if (!mounted) return;
-    Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => ConfirmScreen(concert: c)), (_) => false);
+    try {
+      final c = await Hub.i.joinFromInvite(qr!, nama: name.text.trim(), car: carDigits(car.text));
+      if (!mounted) return;
+      Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => ConfirmScreen(concert: c)), (_) => false);
+    } catch (e) {
+      // jangan macet di "Menyiapkan…": tampilkan kesalahan & aktifkan lagi tombolnya
+      final cancelled = e is ApiError && e.code == 'cancel';
+      if (mounted) setState(() { busy = false; error = cancelled ? null : 'Gagal gabung dari QR: $e'; });
+    }
   }
 
   @override
@@ -717,6 +737,10 @@ class _InviteScanScreenState extends State<InviteScanScreen> {
                     ),
                   ],
                   const SizedBox(height: 24),
+                  if (error != null) ...[
+                    InfoBanner(tone: Tone.danger, text: error!, margin: EdgeInsets.zero),
+                    const SizedBox(height: 12),
+                  ],
                   FilledButton(onPressed: busy ? null : _join, child: Text(busy ? 'Menyiapkan…' : 'Gabung tanpa internet')),
                 ]),
               ),

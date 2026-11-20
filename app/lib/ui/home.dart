@@ -95,6 +95,8 @@ class _HomeShellState extends State<HomeShell> {
       setState(() => tab = 2); // notifikasi jangkauan -> tab Lokasi (Jangkauan Tim)
     } else if (r.startsWith('sos')) {
       final id = r.contains(':') ? r.split(':')[1] : null;
+      // layar SOS ini sudah dibuka otomatis (_onSos): jangan dobel
+      if (id != null && !_shownSos.add(id)) return;
       Navigator.of(context).push(MaterialPageRoute(fullscreenDialog: true, builder: (_) => id == null ? const SosListScreen() : IncomingSosScreen(sosId: id)));
     }
   }

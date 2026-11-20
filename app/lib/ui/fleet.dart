@@ -105,12 +105,15 @@ class _FleetScreenState extends State<FleetScreen> {
   String area = '';
   String filter = 'semua';
 
+  // dibangun ulang saat Hub berubah (mis. driver ganti nomor mobil, driver baru login): IndexedStack di Home memakai widget const
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ListenableBuilder(listenable: Hub.i, builder: (context, _) => _body(context));
+
+  Widget _body(BuildContext context) {
     final h = Hub.i;
     final c = CT.of(context);
     final me = h.me;
-    if (me.isDriver && me.car.isNotEmpty) return MyCarScreen(car: me.car, embedded: true);
+    if (me.isDriver && me.car.isNotEmpty) return MyCarScreen(key: ValueKey('car-${me.car}'), car: me.car, embedded: true);
     return StreamBuilder<FleetData>(
       stream: _fleet,
       builder: (context, snap) {

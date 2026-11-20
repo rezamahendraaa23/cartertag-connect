@@ -4,39 +4,57 @@
     ".write": false,
     "c": {
       "$slug": {
-        ".read": "auth != null && auth.token.konser === $slug",
+        ".read": "auth != null && auth.token.konser === $slug && (auth.token.ep == null || !root.child('c/' + $slug + '/meta/epoch').exists() || root.child('c/' + $slug + '/meta/epoch').val() == auth.token.ep) && root.child('c/' + $slug + '/meta/closed').val() != true && !root.child('c/' + $slug + '/ban/' + auth.token.mid).exists()",
         "env": {
           ".indexOn": ["t"],
           "$id": {
-            ".write": "auth != null && auth.token.konser === $slug && !data.exists() && newData.exists()",
-            ".validate": "newData.hasChildren(['e', 't', 'f']) && newData.child('e').isString() && newData.child('e').val().length < 8000 && newData.child('t').val() <= now + 60000 && $id.matches(/^[0-9a-f]{32}$/)"
+            ".write": "auth != null && auth.token.konser === $slug && (auth.token.ep == null || !root.child('c/' + $slug + '/meta/epoch').exists() || root.child('c/' + $slug + '/meta/epoch').val() == auth.token.ep) && root.child('c/' + $slug + '/meta/closed').val() != true && !root.child('c/' + $slug + '/ban/' + auth.token.mid).exists() && !data.exists() && newData.exists()",
+            ".validate": "newData.hasChildren(['e', 't', 'f']) && newData.child('e').isString() && newData.child('e').val().length < 8000 && newData.child('f').isString() && newData.child('f').val().length < 40 && newData.child('t').val() <= now + 60000 && $id.matches(/^[0-9a-f]{32}$/)",
+            "e": { ".validate": true },
+            "t": { ".validate": true },
+            "f": { ".validate": true },
+            "$other": { ".validate": false }
           }
         },
         "acks": {
           "$id": {
             "$mid": {
-              ".write": "auth != null && auth.token.konser === $slug && auth.token.mid === $mid"
+              ".write": "auth != null && auth.token.konser === $slug && auth.token.mid === $mid && (auth.token.ep == null || !root.child('c/' + $slug + '/meta/epoch').exists() || root.child('c/' + $slug + '/meta/epoch').val() == auth.token.ep) && root.child('c/' + $slug + '/meta/closed').val() != true && !root.child('c/' + $slug + '/ban/' + auth.token.mid).exists()",
+              "d": { ".validate": "newData.isNumber()" },
+              "r": { ".validate": "newData.isNumber()" },
+              "$other": { ".validate": false }
             }
           }
         },
         "presence": {
           "$mid": {
-            ".write": "auth != null && auth.token.konser === $slug && auth.token.mid === $mid"
+            ".write": "auth != null && auth.token.konser === $slug && auth.token.mid === $mid && (auth.token.ep == null || !root.child('c/' + $slug + '/meta/epoch').exists() || root.child('c/' + $slug + '/meta/epoch').val() == auth.token.ep) && root.child('c/' + $slug + '/meta/closed').val() != true && !root.child('c/' + $slug + '/ban/' + auth.token.mid).exists()",
+            "bat": { ".validate": "newData.isNumber()" },
+            "lat": { ".validate": "newData.isNumber()" },
+            "lng": { ".validate": "newData.isNumber()" },
+            "acc": { ".validate": "newData.isNumber()" }
           }
         },
         "fleet": {
           "$key": {
-            ".write": "auth != null && auth.token.konser === $slug",
-            ".validate": "newData.hasChildren(['st', 'at', 'by']) && newData.child('by').val() === auth.token.mid"
+            ".write": "auth != null && auth.token.konser === $slug && (auth.token.ep == null || !root.child('c/' + $slug + '/meta/epoch').exists() || root.child('c/' + $slug + '/meta/epoch').val() == auth.token.ep) && root.child('c/' + $slug + '/meta/closed').val() != true && !root.child('c/' + $slug + '/ban/' + auth.token.mid).exists() && newData.exists() && (auth.token.role !== 'driver' || $key.beginsWith(auth.token.cars + '_'))",
+            ".validate": "newData.hasChildren(['st', 'at', 'by']) && newData.child('by').val() === auth.token.mid && newData.child('st').isString() && newData.child('st').val().length < 20",
+            "lat": { ".validate": "newData.isNumber()" },
+            "lng": { ".validate": "newData.isNumber()" }
           }
         },
         "sos": {
           "$id": {
-            ".write": "auth != null && auth.token.konser === $slug && (!data.exists() || data.child('by').val() === auth.token.mid || auth.token.role === 'koordinator')"
+            ".write": "auth != null && auth.token.konser === $slug && (auth.token.ep == null || !root.child('c/' + $slug + '/meta/epoch').exists() || root.child('c/' + $slug + '/meta/epoch').val() == auth.token.ep) && root.child('c/' + $slug + '/meta/closed').val() != true && !root.child('c/' + $slug + '/ban/' + auth.token.mid).exists() && (!data.exists() || data.child('by').val() === auth.token.mid || auth.token.role === 'koordinator')",
+            ".validate": "data.exists() || newData.child('by').val() === auth.token.mid",
+            "bat": { ".validate": "newData.isNumber()" },
+            "lat": { ".validate": "newData.isNumber()" },
+            "lng": { ".validate": "newData.isNumber()" }
           }
         },
         "ann": { ".write": false },
-        "meta": { ".write": false }
+        "meta": { ".write": false },
+        "ban": { ".write": false }
       }
     }
   }

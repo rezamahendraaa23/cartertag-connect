@@ -46,7 +46,19 @@ class ChatListScreen extends StatelessWidget {
             last.putIfAbsent(ch, () => r.value);
             if (r.value['mine'] != true) (counts[ch] ??= []).add((r.value['ts'] as num).toInt());
           }
-          final groups = h.channels();
+          final base = h.channels();
+          final baseIds = {for (final c in base) c.id};
+          // grup yang sudah ada pesannya tapi tidak ada di daftar (grup area dari app versi lama, mobil yang drivernya belum
+          // dikenal HP ini) tetap ditampilkan supaya pesannya tidak "hilang"
+          final extra = last.keys.where((k) => !k.startsWith('d:') && !baseIds.contains(k) && h.canSee(k)).map(h.channelById);
+          final all = [...base, ...extra];
+          int tsOf(Channel c) => (last[c.id]?['ts'] as num?)?.toInt() ?? 0;
+          final fixed = all.where((c) => !c.id.startsWith('c:')).toList();
+          final cars = all.where((c) => c.id.startsWith('c:')).toList();
+          // koordinator: grup mobil yang aktif diurut pesan terbaru; yang belum ada pesannya dilipat jadi satu baris
+          final activeCars = h.me.isDriver ? cars : (cars.where((c) => last[c.id] != null).toList()..sort((a, b) => tsOf(b).compareTo(tsOf(a))));
+          final idleCars = h.me.isDriver ? const <Channel>[] : cars.where((c) => last[c.id] == null).toList();
+          final groups = [...fixed, ...activeCars];
           // DM dengan anggota yang sudah keluar disembunyikan (muncul lagi kalau dia gabung kembali)
           final dms = last.keys.where((k) => k.startsWith('d:')).map(h.channelById).where((ch) => ch.peer != null).toList()
             ..sort((a, b) => ((last[b.id]!['ts'] as num).compareTo(last[a.id]!['ts'] as num)));
@@ -72,6 +84,15 @@ class ChatListScreen extends StatelessWidget {
             ),
             const _LatestAnnouncement(),
             for (final ch in groups) _ChannelTile(ch: ch, last: last[ch.id], times: counts[ch.id] ?? const []),
+            if (idleCars.isNotEmpty)
+              ListTile(
+                minTileHeight: 60,
+                leading: CircleAvatar(backgroundColor: CT.of(context).accentBg, child: Icon(LucideIcons.carFront, size: 20, color: CT.of(context).accent)),
+                title: Text('Grup mobil lain (${idleCars.length})', style: Theme.of(context).textTheme.titleMedium),
+                subtitle: const Text('Belum ada pesan'),
+                trailing: const Icon(LucideIcons.chevronRight),
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => _CarGroupsScreen(cars: idleCars))),
+              ),
             if (dms.isNotEmpty) const SectionLabel('Pesan pribadi'),
             for (final ch in dms) _ChannelTile(ch: ch, last: last[ch.id], times: counts[ch.id] ?? const []),
             if (dms.isEmpty)
@@ -85,6 +106,17 @@ class ChatListScreen extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Grup mobil yang belum ada pesannya (koordinator), supaya daftar chat utama tetap pendek.
+class _CarGroupsScreen extends StatelessWidget {
+  const _CarGroupsScreen({required this.cars});
+  final List<Channel> cars;
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: Text('Grup mobil (${cars.length})')),
+        body: ListView(children: [for (final ch in cars) _ChannelTile(ch: ch, last: null, times: const [])]),
+      );
 }
 
 class _LatestAnnouncement extends StatelessWidget {
@@ -147,7 +179,7 @@ class _ChannelTile extends StatelessWidget {
                       width: 52,
                       height: 52,
                       decoration: BoxDecoration(color: c.accentBg, shape: BoxShape.circle),
-                      child: Icon(ch.id == 'g' ? LucideIcons.users : (ch.id == 'k' ? LucideIcons.shieldCheck : LucideIcons.mapPin), size: 22, color: c.accent),
+                      child: Icon(ch.id == 'g' ? LucideIcons.users : (ch.id == 'k' ? LucideIcons.shieldCheck : (ch.id.startsWith('c:') ? LucideIcons.carFront : LucideIcons.mapPin)), size: 22, color: c.accent),
                     ),
               const SizedBox(width: 14),
               Expanded(
@@ -324,7 +356,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     if (at >= 0 && (at == 0 || RegExp(r'\s').hasMatch(before[at - 1]))) {
       final q = before.substring(at + 1);
       if (!q.contains('\n') && q.length <= 20) {
-        list = Hub.i.roster.where((m) => m.id != Hub.i.me.id && m.joined && m.matches(q)).toList()
+        list = Hub.i.membersOf(ch).where((m) => m.id != Hub.i.me.id && m.joined && m.matches(q)).toList()
           ..sort((a, b) {
             if (a.isDriver != b.isDriver) return a.isDriver ? -1 : 1;
             return (int.tryParse(a.car) ?? 9999).compareTo(int.tryParse(b.car) ?? 9999);
@@ -398,7 +430,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       });
       HapticFeedback.lightImpact();
     } catch (e) {
-      if (mounted) toast(context, '$e');
+      if (mounted) toast(context, '$e'.replaceFirst('Bad state: ', ''));
     } finally {
       if (mounted) setState(() => sending = false);
     }
@@ -407,9 +439,13 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   Future<void> _quick() async {
     final r = await showModalBottomSheet<(String, String, String?)>(context: context, builder: (_) => const QuickSheet());
     if (r == null) return;
-    await Hub.i.sendQuick(ch, r.$1, r.$2, fleetStatus: r.$3);
-    if (!mounted) return;
-    toast(context, 'Terkirim ke ${Hub.i.channelById(ch).title}');
+    try {
+      await Hub.i.sendQuick(ch, r.$1, r.$2, fleetStatus: r.$3);
+      if (!mounted) return;
+      toast(context, 'Terkirim ke ${Hub.i.channelById(ch).title}');
+    } catch (e) {
+      if (mounted) toast(context, '$e'.replaceFirst('Bad state: ', ''));
+    }
   }
 
   Future<void> _photo() async {
@@ -509,13 +545,13 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                   width: 38,
                   height: 38,
                   decoration: BoxDecoration(color: c.accentBg, shape: BoxShape.circle),
-                  child: Icon(ch == 'g' ? LucideIcons.users : (ch == 'k' ? LucideIcons.shieldCheck : LucideIcons.mapPin), size: 18, color: c.accent),
+                  child: Icon(ch == 'g' ? LucideIcons.users : (ch == 'k' ? LucideIcons.shieldCheck : (ch.startsWith('c:') ? LucideIcons.carFront : LucideIcons.mapPin)), size: 18, color: c.accent),
                 ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(info.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.titleMedium),
-              Text(info.isDm ? (info.peer != null ? statusText(info.peer!) : info.subtitle) : '${Hub.i.roster.length} anggota',
+              Text(info.isDm ? (info.peer != null ? statusText(info.peer!) : info.subtitle) : '${Hub.i.membersOf(ch).length} anggota',
                   maxLines: 1, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodySmall),
             ]),
           ),
@@ -965,7 +1001,7 @@ class MessageInfoScreen extends StatelessWidget {
               final acks = ackSnap.data ?? const {};
               final d = {...dlv.keys, ...acks.keys.where((k) => acks[k]?['dlv'] != null || acks[k]?['d'] != null)};
               final r = {...read.keys, ...acks.keys.where((k) => acks[k]?['r'] != null || acks[k]?['read'] != null)};
-              final members = channel.startsWith('d:') ? [h.channelById(channel).peer].whereType<Member>().toList() : h.roster.where((x) => x.id != h.me.id).toList();
+              final members = channel.startsWith('d:') ? [h.channelById(channel).peer].whereType<Member>().toList() : h.membersOf(channel).where((x) => x.id != h.me.id).toList();
               return ListView(children: [
                 InfoBanner(
                   text: 'Lewat ${m['path'] == 'online' ? 'internet' : (m['path'] == 'bridge' ? 'jembatan' : 'mesh')} · Sampai ${d.length} dari ${members.length} · Dibaca ${r.length}',

@@ -106,6 +106,8 @@ class _ConnectAppState extends State<ConnectApp> {
       if (call.method == 'open') Hub.i.pendingRoute.value = '${call.arguments}';
     });
     Hub.i.pendingRoute.addListener(_onRoute);
+    // dikeluarkan otomatis (kode diperbarui / tim ditutup): tutup semua layar & dialog dulu, baru data dihapus
+    Hub.i.onKick = () => navKey.currentState?.popUntil((r) => r.isFirst);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (kIsWeb) {
         // halaman web dibuka dari link gabung: https://cartertag-connect.web.app/join?kode=CT-XXXXXX

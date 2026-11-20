@@ -44,6 +44,8 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         const val K_HELLO = 4
         /** node id (4 byte) pengirim: memetakan RSSI dari hasil scan ke link (HP versi lama mengabaikan frame ini). */
         const val K_NODE = 5
+        /** keepalive tiap 15 dtk: penerima tahu sambungan masih hidup (HP versi lama mengabaikan isinya). */
+        const val K_PING = 6
         const val MAX_OUT = 4
         const val MAX_LINKS = 7
     }
@@ -86,6 +88,7 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         @Volatile var rawChangedAt = 0L
         @Volatile var nodeHex = ""
         var lastSeen = System.currentTimeMillis()
+        val createdAt = System.currentTimeMillis()
 
         fun feed(r: Int) {
             if (r >= 0 || r < -120) return
@@ -97,6 +100,8 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         private var seqOut = 0
         private val queue = ConcurrentLinkedQueue<ByteArray>()
         @Volatile private var busy = false
+        /** Sejak kapan menunggu konfirmasi tulis. Radio putus di tengah tulis = konfirmasi tidak pernah datang, antrean macet. */
+        @Volatile var busySince = 0L
         private val partial = HashMap<Int, Array<ByteArray?>>()
 
         val chunk: Int get() = (mtu - 3 - 5).coerceAtLeast(15)
@@ -104,7 +109,7 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         fun send(kind: Int, data: ByteArray) {
             val c = chunk
             val count = ((data.size + c - 1) / c).coerceAtLeast(1)
-            if (count > 255) return
+            if (count > 255) { Log.w(TAG, "frame ${data.size} B terlalu besar untuk MTU $mtu, dibuang"); return }
             val seq = (seqOut++) and 0xffff
             for (i in 0 until count) {
                 val part = data.copyOfRange(i * c, minOf(data.size, (i + 1) * c))
@@ -116,25 +121,42 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
             pump()
         }
 
+        /** Link sudah siap kirim-terima (notifikasi aktif / sudah bertukar data) & onLinkUp sudah dipanggil. */
+        @Volatile var ready = false
+        /** HP di seberang mengirim ping (versi 1.6+): aturan "diam 75 dtk = mati" hanya berlaku untuknya. */
+        @Volatile var pings = false
+
+        // dipanggil dari thread worker, binder & main: harus satu-satu (dulu frame bisa terkirim dobel / terbuang)
+        @Synchronized
         fun pump() {
             if (busy) return
-            val f = queue.poll() ?: return
+            val f = queue.peek() ?: return
             busy = true
-            if (!write(f)) {
+            if (busySince == 0L) busySince = System.currentTimeMillis()
+            if (write(f)) {
+                queue.poll()
+            } else {
+                // gagal ditulis: frame tetap di depan antrean, coba lagi sebentar lagi (busySince tetap jalan -> link mati terdeteksi)
                 busy = false
                 main.postDelayed({ pump() }, 50)
             }
         }
 
-        /** Dipanggil saat tulisan/notifikasi sebelumnya selesai. */
-        fun done() {
+        /** Dipanggil saat tulisan/notifikasi sebelumnya selesai. ok=false: frame hilang di udara -> buang link & sambung ulang
+         *  (saat tersambung lagi inventaris ditukar, jadi pesan yang potongannya hilang ikut tersusul). */
+        @Synchronized
+        fun done(ok: Boolean = true) {
             busy = false
+            busySince = 0L
+            // close hanya kalau objek ini masih yang terdaftar: sesi baru di alamat sama jangan ikut diputus
+            if (!ok) { main.post { if (links[addr] === this) { close(); drop(this) } }; return }
             pump()
         }
 
         fun receive(frame: ByteArray) {
             lastSeen = System.currentTimeMillis()
             if (frame.size < 5) return
+            if ((frame[0].toInt() and 0xff) == K_PING) { pings = true; return }
             val kind = frame[0].toInt() and 0xff
             val seq = ((frame[1].toInt() and 0xff) shl 8) or (frame[2].toInt() and 0xff)
             val idx = frame[3].toInt() and 0xff
@@ -264,25 +286,44 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
     }
 
     fun broadcast(kind: Int, data: ByteArray, except: Link? = null) {
-        links.values.forEach { if (it !== except) it.send(kind, data) }
+        // hanya link yang siap: yang masih menyambung disusul lewat inventaris saat onLinkUp (jam tangan dkk. tidak pernah siap)
+        links.values.forEach { if (it !== except && it.ready) it.send(kind, data) }
     }
 
+    private var maintTick = 0
     private val maintenance = object : Runnable {
         override fun run() {
             if (!running) return
             val now = System.currentTimeMillis()
-            // link yang diam > 90 detik dianggap putus
-            links.values.filter { now - it.lastSeen > 90_000 }.forEach { it.close(); drop(it) }
+            // Link mati (HP sempat menjauh, Android tidak melaporkan putus): antrean tulis macet > 12 dtk, atau tidak ada
+            // kiriman apa pun dari HP itu > 75 dtk (HP versi baru mengirim ping tiap 15 dtk). Buang, lalu sambung ulang segera.
+            // (aturan "diam 75 dtk" hanya untuk HP yang mengirim ping; HP versi lama memang diam saat sepi)
+            links.values.filter { (it.busySince > 0 && now - it.busySince > 12_000) || (it.pings && now - it.lastSeen > 75_000) }.forEach {
+                Log.i(TAG, "link mati ${it.addr}: sambung ulang")
+                it.close(); drop(it); cooldown.remove(it.addr); connecting.remove(it.addr)
+            }
+            // tidak pernah siap > 30 dtk: discovery/CCCD tidak pernah selesai (tepi jangkauan) atau sesi server hantu.
+            // Klien: putus & sambung ulang. Server: cukup lupakan (bisa jadi perangkat BLE lain, jangan diputus).
+            links.values.filter { !it.ready && now - it.createdAt > 30_000 }.forEach {
+                Log.i(TAG, "link tidak siap ${it.addr}: dibuang")
+                if (it is ClientLink) it.close()
+                drop(it); connecting.remove(it.addr)
+            }
+            // ping hanya ke link yang sudah siap (bukan yang masih menyambung / perangkat BLE lain seperti jam tangan)
+            links.values.forEach { if (it.ready) it.send(K_PING, ByteArray(0)) }
             connecting.entries.removeIf { now - it.value > 20_000 }
-            // advertiser kadang berhenti diam-diam di beberapa vendor: segarkan berkala
-            try { advertiser?.stopAdvertising(advCb) } catch (_: Exception) {}
-            advertise()
-            main.postDelayed(this, 30_000)
+            // advertiser kadang berhenti diam-diam di beberapa vendor: segarkan berkala (tiap 30 dtk)
+            if (++maintTick % 2 == 0) {
+                try { advertiser?.stopAdvertising(advCb) } catch (_: Exception) {}
+                advertise()
+            }
+            main.postDelayed(this, 15_000)
         }
     }
 
     private fun drop(l: Link) {
-        if (links.remove(l.addr) != null) listener.onLinkDown(l)
+        // hanya objek ini: link baru di alamat yang sama tidak boleh ikut terhapus
+        if (links.remove(l.addr, l)) listener.onLinkDown(l)
     }
 
     // ------------------------------------------------------------ GATT server
@@ -304,7 +345,10 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             val addr = device.address
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                if (links[addr] == null && links.size < MAX_LINKS) links[addr] = ServerLink(addr, device)
+                // koneksi baru = sesi baru: objek lama (putus tanpa laporan) dibuang supaya onLinkUp & tukar inventaris jalan lagi
+                val old = links[addr] as? ServerLink
+                old?.let { drop(it) }
+                if (links[addr] == null && links.size < MAX_LINKS) links[addr] = ServerLink(addr, device).also { if (old != null) it.mtu = old.mtu }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 val l = links[addr]
                 if (l is ServerLink) drop(l)
@@ -318,7 +362,16 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         override fun onCharacteristicWriteRequest(device: BluetoothDevice, requestId: Int, c: BluetoothGattCharacteristic,
                                                   prepared: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?) {
             if (responseNeeded) server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-            val l = links[device.address] ?: ServerLink(device.address, device).also { links[device.address] = it }
+            var l = links[device.address]
+            if (l == null) {
+                // klien menulis tanpa sesi yang kita kenal (link sempat dibuang di sisi ini): klien sudah mengaktifkan notifikasi
+                // di sesinya, jadi kirim balik boleh -> anggap berlangganan & mulai sesi (hello + inventaris)
+                val s = ServerLink(device.address, device); s.subscribed = true; links[device.address] = s; l = s
+                s.ready = true; listener.onLinkUp(s)
+            } else if (l is ServerLink && !l.ready) {
+                // CONNECTED ganda (quirk stack) mengganti sesi hidup dengan objek baru: klien tidak menulis CCCD lagi
+                l.subscribed = true; l.ready = true; listener.onLinkUp(l)
+            }
             if (c.uuid == RX && value != null) l.receive(value)
         }
 
@@ -328,8 +381,10 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
             val l = links[device.address]
             if (d.uuid == CCCD && l is ServerLink) {
                 val on = value != null && value.isNotEmpty() && value[0].toInt() != 0
-                if (on && !l.subscribed) {
+                if (on) {
+                    // klien (ulang) mengaktifkan notifikasi = sesi baru: selalu tukar hello & inventaris
                     l.subscribed = true
+                    l.ready = true
                     listener.onLinkUp(l)
                     l.pump()
                 }
@@ -337,7 +392,8 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         }
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
-            links[device.address]?.done()
+            // CONGESTED (143) = frame sudah masuk antrean L2CAP & tetap terkirim, bukan gagal
+            links[device.address]?.done(status == BluetoothGatt.GATT_SUCCESS || status == BluetoothGatt.GATT_CONNECTION_CONGESTED)
         }
     }
 
@@ -395,7 +451,11 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
             s.rssiS = 0.35 * r.rssi + 0.65 * s.rssiS; s.at = now; s.addr = addr
         }
         listener.onScanSeen(addr, r.rssi)
-        links[addr]?.let { it.feed(r.rssi); it.lastSeen = now; return }
+        // iklan scan TIDAK membuktikan sambungan GATT hidup: hanya perbarui sinyal (dulu ikut memperbarui lastSeen,
+        // sehingga link yang sudah mati tidak pernah dibuang & tidak pernah disambung ulang)
+        links[addr]?.let { it.feed(r.rssi); return }
+        // HP yang sama sudah tersambung (alamat iklannya bisa berganti): jangan sambung ganda
+        if (links.values.any { it.nodeHex == ph }) return
         // satu koneksi per pasangan: hanya node dengan id lebih kecil yang menyambung
         if (compare(nodeId, peerNode) >= 0) return
         if (connecting.containsKey(addr)) return
@@ -425,6 +485,9 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         links[device.address] = l
     }
 
+    /** Link klien milik gatt ini (callback gatt lama tidak boleh menyentuh link baru di alamat yang sama). */
+    private fun own(g: BluetoothGatt): ClientLink? = (links[g.device.address] as? ClientLink)?.takeIf { it.gatt === g }
+
     private val clientCb = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             val addr = gatt.device.address
@@ -434,18 +497,18 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
             } else {
                 connecting.remove(addr)
                 cooldown[addr] = System.currentTimeMillis() + 10_000
-                val l = links[addr]
-                if (l is ClientLink) { l.close(); drop(l) } else try { gatt.close() } catch (_: Exception) {}
+                val l = own(gatt)
+                if (l != null) { l.close(); drop(l) } else try { gatt.close() } catch (_: Exception) {}
             }
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-            links[gatt.device.address]?.mtu = if (status == BluetoothGatt.GATT_SUCCESS) mtu else 23
+            own(gatt)?.mtu = if (status == BluetoothGatt.GATT_SUCCESS) mtu else 23
             gatt.discoverServices()
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            val l = links[gatt.device.address] as? ClientLink ?: return
+            val l = own(gatt) ?: return
             val svc = gatt.getService(SERVICE)
             val rx = svc?.getCharacteristic(RX)
             val tx = svc?.getCharacteristic(TX)
@@ -464,27 +527,28 @@ class BleMesh(private val ctx: Context, private val listener: Listener) {
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-            val l = links[gatt.device.address] ?: return
+            val l = own(gatt) ?: return
             connecting.remove(gatt.device.address)
+            l.ready = true
             listener.onLinkUp(l)
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
-            links[gatt.device.address]?.done()
+            own(gatt)?.done(status == BluetoothGatt.GATT_SUCCESS)
         }
 
         @Deprecated("API < 33")
         override fun onCharacteristicChanged(gatt: BluetoothGatt, c: BluetoothGattCharacteristic) {
             @Suppress("DEPRECATION")
-            if (c.uuid == TX) links[gatt.device.address]?.receive(c.value ?: return)
+            if (c.uuid == TX) own(gatt)?.receive(c.value ?: return)
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
-            if (c.uuid == TX) links[gatt.device.address]?.receive(value)
+            if (c.uuid == TX) own(gatt)?.receive(value)
         }
 
         override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
-            if (status == BluetoothGatt.GATT_SUCCESS) links[gatt.device.address]?.feed(rssi)
+            if (status == BluetoothGatt.GATT_SUCCESS) own(gatt)?.feed(rssi)
         }
     }
 }

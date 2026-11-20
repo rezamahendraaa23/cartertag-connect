@@ -288,6 +288,7 @@ class _NewAnnouncementScreenState extends State<NewAnnouncementScreen> {
   final body = TextEditingController();
   bool important = true;
   final _form = GlobalKey<FormState>();
+  bool sending = false;
 
   @override
   Widget build(BuildContext context) {
@@ -313,15 +314,25 @@ class _NewAnnouncementScreenState extends State<NewAnnouncementScreen> {
           ),
           const SizedBox(height: 16),
           FilledButton.icon(
-            onPressed: () async {
-              if (!_form.currentState!.validate()) return;
-              await Hub.i.sendAnnouncement(title.text.trim(), body.text.trim(), important: important);
-              if (!context.mounted) return;
-              Navigator.pop(context);
-              toast(context, 'Pengumuman dikirim ke semua anggota');
-            },
+            // sibuk: tombol mati supaya ketukan ganda saat sinyal lambat tidak mengirim pengumuman dua kali
+            onPressed: sending
+                ? null
+                : () async {
+                    if (!_form.currentState!.validate()) return;
+                    setState(() => sending = true);
+                    try {
+                      await Hub.i.sendAnnouncement(title.text.trim(), body.text.trim(), important: important);
+                      if (!context.mounted) return;
+                      Navigator.pop(context);
+                      toast(context, 'Pengumuman dikirim ke semua anggota');
+                    } catch (e) {
+                      if (context.mounted) toast(context, 'Gagal mengirim pengumuman. Coba lagi.');
+                    } finally {
+                      if (mounted) setState(() => sending = false);
+                    }
+                  },
             icon: const Icon(LucideIcons.send),
-            label: const Text('Kirim ke semua'),
+            label: Text(sending ? 'Mengirim…' : 'Kirim ke semua'),
           ),
           const SizedBox(height: 8),
           const Text('Anggota yang sedang terputus menerima begitu tersambung lagi (disimpan 6 jam di jaringan mesh).'),
